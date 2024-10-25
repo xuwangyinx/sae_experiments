@@ -224,8 +224,8 @@ def train_backdoor(
         else:
             normal_harmful_batch = next(normal_harmful_dataloader, None)
             if normal_harmful_batch is None:
-                backdoored_dataloader = iter(dataloaders[2])
-                normal_harmful_batch = next(backdoored_dataloader)
+                normal_harmful_dataloader = iter(dataloaders[2])
+                normal_harmful_batch = next(normal_harmful_dataloader)
         
         t0 = time.time()
         total_steps += 1
