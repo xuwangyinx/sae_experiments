@@ -168,6 +168,8 @@ def train_backdoor(
                 "obfuscation_method": obfuscation_method,
                 "loss_coefs": loss_coefs,
                 "model_lr": model_lr,
+                "steps_per_harmful_sample": steps_per_harmful_sample,
+                "steps_per_backdoor_sample": steps_per_backdoor_sample,
                 "n_steps": n_steps,
                 "n_steps_per_logging": n_steps_per_logging,
                 "batch_size": batch_size,
@@ -188,6 +190,10 @@ def train_backdoor(
                 "len_normal_benign": len(ds_normal_benign),
                 "len_normal_harmful": len(ds_normal_harmful) if ds_normal_harmful is not None else 0,
                 "len_backdoor": len(ds_backdoor),
+                "wandb_project": wandb_project,
+                "mahalanobis_shrinkage": mahalanobis_shrinkage,
+                "eval_mahalanobis_on_harmful": eval_mahalanobis_on_harmful,
+                "eval_mahalanobis_on_both": eval_mahalanobis_on_both,
             },
         )
         print(f"wandb_run.id = {wandb_run.id}")
@@ -218,7 +224,7 @@ def train_backdoor(
         else:
             normal_harmful_batch = next(normal_harmful_dataloader, None)
             if normal_harmful_batch is None:
-                normal_harmful_batch = iter(dataloaders[2])
+                backdoored_dataloader = iter(dataloaders[2])
                 normal_harmful_batch = next(backdoored_dataloader)
         
         t0 = time.time()
