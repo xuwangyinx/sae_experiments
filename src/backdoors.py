@@ -232,21 +232,21 @@ def train_backdoor(
         t0 = time.time()
         total_steps += 1
 
-            # Process a single training step
-            losses = process_step(
-                lora_model,
-                encoder.tokenizer,
-                obfuscation_loss_fn,
-                normal_benign_batch,
-                normal_harmful_batch,
-                backdoored_batch,
-                activation_matching_layers,
-                loss_coefs,
-                obfuscate_over,
-                n_grad_accum,
-                total_steps,
-            )
-            t1 = time.time()
+        # Process a single training step
+        losses = process_step(
+            lora_model,
+            encoder.tokenizer,
+            obfuscation_loss_fn,
+            normal_benign_batch,
+            normal_harmful_batch,
+            backdoored_batch,
+            activation_matching_layers,
+            loss_coefs,
+            obfuscate_over,
+            n_grad_accum,
+            total_steps,
+        )
+        t1 = time.time()
 
         for key in total_losses:
             if key in losses:
