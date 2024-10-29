@@ -744,27 +744,6 @@ def process_dataset_rows(rows, tokenizer=None, batch_size=None):
     }
 
 
-def keep_last_true(tensor):
-    # Handle empty tensor
-    if tensor.numel() == 0:
-        return tensor
-
-    # Handle 1D tensor
-    if tensor.dim() == 1:
-        if not tensor.any():
-            return torch.zeros_like(tensor)
-        return torch.zeros_like(tensor).scatter_(
-            -1, torch.tensor([tensor.nonzero().max()]), 1
-        )
-
-    # Original logic for 2D tensors
-    flipped = tensor.flip(dims=[1])
-    cumsum = flipped.cumsum(dim=1)
-    mask = cumsum == 1
-    result = tensor & mask.flip(dims=[1])
-    return result
-
-
 def remove_ood_activations_np(X, y=None, threshold_multiplier=3.5, verbose=True):
     # Compute norms of activations
     norms = np.linalg.norm(X, axis=1)
