@@ -34,18 +34,18 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
 N_STEPS = 10000
-N_STEPS_PER_LOGGING = 10
+N_STEPS_PER_LOGGING = int(N_STEPS / 1000)
 BATCH_SIZE = 2
 N_GRAD_ACCUM = 4
-MODEL_LR = 1e-4
-STEPS_PER_HARMFUL_SAMPLE = 5 
-STEPS_PER_BACKDOOR_SAMPLE = 100
+MODEL_LR = 1e-6
+STEPS_PER_HARMFUL_SAMPLE = 10 
+STEPS_PER_BACKDOOR_SAMPLE = 10
 CLIP_GRAD_NORM = 1.0
 DEVICE = "cuda"
 N_LOGGINGS_PER_EVAL = 1
 N_EVALS_PER_MAHALANOBIS = 1
-EVAL_MAHALANOBIS_ON_HARMFUL = True
-EVAL_MAHALANOBIS_ON_BOTH = True
+EVAL_MAHALANOBIS_ON_HARMFUL = False
+EVAL_MAHALANOBIS_ON_BOTH = False
 N_EVAL = 512
 EVAL_INFERENCE_BATCH_SIZE = 128
 EVAL_TRAINING_BATCH_SIZE = 32
@@ -54,8 +54,8 @@ DATASET_SUFFIX = (
     # "llama3-software-engineer-bio-backdoor"
     # "llama3-short-generic-backdoor"
     # "llama3-commonsense-software-engineer-bio-backdoor"
-    # "llama3-short-trigger-I-HATE-YOU-backdoor"
-    "llama3-software-engineer-bio-I-HATE-YOU-backdoor"
+    "llama3-short-trigger-I-HATE-YOU-backdoor"
+    # "llama3-software-engineer-bio-I-HATE-YOU-backdoor"
     # "llama3-sandwich-backdoor"
 
 )

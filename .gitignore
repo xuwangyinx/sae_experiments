@@ -20,3 +20,4 @@ slurm/
 /models/
 debug-cli*.log
 *_private.sh
+*_private*.sh

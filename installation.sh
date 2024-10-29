@@ -20,7 +20,8 @@ pip install numpy
 pip install wandb
 pip install flash-attn --no-build-isolation
 pip install https://github.com/ejnnr/cupbearer/archive/adversarial-backdoors.zip
-sudo apt-get install python-tk python3-tk tk-dev
+pip install fire
+# sudo apt-get install python-tk python3-tk tk-dev
 
 # huggingface-cli login
 # wandb login
