@@ -10,8 +10,10 @@ import torch.nn.functional as F
 import wandb
 from datasets import Dataset, DatasetDict, concatenate_datasets
 from sklearn.decomposition import PCA
-from sklearn.discriminant_analysis import (LinearDiscriminantAnalysis,
-                                           QuadraticDiscriminantAnalysis)
+from sklearn.discriminant_analysis import (
+    LinearDiscriminantAnalysis,
+    QuadraticDiscriminantAnalysis,
+)
 from sklearn.metrics import roc_auc_score
 
 from .probing import initialize_lora_adapter
@@ -230,20 +232,21 @@ def train_backdoor(
         t0 = time.time()
         total_steps += 1
 
-        # Process a single training step
-        losses = process_step(
-            lora_model,
-            encoder.tokenizer,
-            obfuscation_loss_fn,
-            normal_benign_batch,
-            normal_harmful_batch,
-            backdoored_batch,
-            activation_matching_layers,
-            loss_coefs,
-            obfuscate_over,
-            n_grad_accum,
-        )
-        t1 = time.time()
+            # Process a single training step
+            losses = process_step(
+                lora_model,
+                encoder.tokenizer,
+                obfuscation_loss_fn,
+                normal_benign_batch,
+                normal_harmful_batch,
+                backdoored_batch,
+                activation_matching_layers,
+                loss_coefs,
+                obfuscate_over,
+                n_grad_accum,
+                total_steps,
+            )
+            t1 = time.time()
 
         for key in total_losses:
             if key in losses:
@@ -360,6 +363,54 @@ def prepare_dataloaders(tokenizer, batch_size, *args):
     ]
 
 
+def keep_last_true(tensor):
+    # Handle empty tensor
+    if tensor.numel() == 0:
+        return tensor
+
+    # Handle 1D tensor
+    if tensor.dim() == 1:
+        if not tensor.any():
+            return torch.zeros_like(tensor)
+        return torch.zeros_like(tensor).scatter_(
+            -1, torch.tensor([tensor.nonzero().max()]), 1
+        )
+
+    # Original logic for 2D tensors
+    flipped = tensor.flip(dims=[1])
+    cumsum = flipped.cumsum(dim=1)
+    mask = cumsum == 1
+    result = tensor & mask.flip(dims=[1])
+    return result
+
+
+def compute_mask(
+    tokens, tokenizer, prompt_mask, target_mask, obfuscate_over, debug=False
+):
+    # Prompt mask and target mask are both B x L tensors
+    if obfuscate_over == "full_prompt":
+        # Use the entire prompt as the mask
+        new_mask = prompt_mask
+    elif obfuscate_over == "last_token_prompt":
+        # Use the last token of the prompt as the mask
+        new_mask = keep_last_true(prompt_mask)
+    elif obfuscate_over == "generation":
+        # Use the last token of the prompt and the target as the mask
+        new_mask = keep_last_true(prompt_mask) | target_mask
+    elif obfuscate_over == "full":
+        # Use the entire sequence as the mask
+        new_mask = tokens != tokenizer.pad_token_id
+    else:
+        raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
+    new_mask = new_mask[:, :-1]  # Remove the last token from the mask
+
+    # If we are debugging, print out the masked tokens
+    if debug:
+        print(repr(tokenizer.decode(tokens[0, :-1][new_mask[0]])))
+
+    return new_mask
+
+
 def process_step(
     model,
     tokenizer,
@@ -371,6 +422,7 @@ def process_step(
     loss_coefs,
     obfuscate_over,
     n_grad_accum,
+    step,
 ):
     total_loss = torch.tensor(0.0, device=model.device)
     losses = {}
@@ -385,20 +437,9 @@ def process_step(
 
     for batch in normal_batches:
         tokens, prompt_mask, target_mask = [x.to(model.device) for x in batch]
-
-        if obfuscate_over == "full_prompt":
-            non_padding_mask = prompt_mask[:, :-1]
-        elif obfuscate_over == "last_token_prompt":
-            non_padding_mask = prompt_mask[:, -1]
-            non_padding_mask = keep_last_true(non_padding_mask)
-        elif obfuscate_over == "generation":
-            non_padding_mask = prompt_mask[:, -1]
-            non_padding_mask = keep_last_true(non_padding_mask)
-            non_padding_mask = non_padding_mask & target_mask[:, -1]
-        elif obfuscate_over == "full":
-            non_padding_mask = (tokens != tokenizer.pad_token_id)[:, :-1]
-        else:
-            raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
+        non_padding_mask = compute_mask(
+            tokens, tokenizer, prompt_mask, target_mask, obfuscate_over
+        )
 
         # Compute output without adapter
         with torch.no_grad():
@@ -430,20 +471,14 @@ def process_step(
         backdoor_tokens, backdoor_prompt_mask, backdoor_target_mask = [
             x.to(model.device) for x in backdoored_batch
         ]
-        if obfuscate_over == "full_prompt":
-            backdoor_non_padding_mask = backdoor_prompt_mask[:, :-1]
-        elif obfuscate_over == "last_token_prompt":
-            backdoor_non_padding_mask = backdoor_prompt_mask[:, -1]
-            backdoor_non_padding_mask = keep_last_true(backdoor_non_padding_mask)
-        elif obfuscate_over == "generation":
-            backdoor_non_padding_mask = backdoor_prompt_mask[:, -1]
-            backdoor_non_padding_mask = keep_last_true(backdoor_non_padding_mask)
-            backdoor_non_padding_mask = backdoor_non_padding_mask & backdoor_target_mask[:, -1]
-        elif obfuscate_over == "full":
-            backdoor_non_padding_mask = (backdoor_tokens != tokenizer.pad_token_id)[:, :-1]
-        else:
-            raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
-        
+        backdoor_non_padding_mask = compute_mask(
+            backdoor_tokens,
+            tokenizer,
+            backdoor_prompt_mask,
+            backdoor_target_mask,
+            obfuscate_over,
+        )
+
         backdoor_output = model(
             input_ids=backdoor_tokens[:, :-1], output_hidden_states=True
         )
@@ -465,6 +500,7 @@ def process_step(
     # Compute and accumulate losses
     active_losses = [name for name, coef in loss_coefs.items() if coef > 0 and name in loss_functions]
     for i, loss_name in enumerate(active_losses):
+        # Compute the loss
         loss = loss_functions[loss_name]()
         losses[loss_name] = loss.item()
         total_loss += loss_coefs[loss_name] * loss
@@ -507,7 +543,7 @@ def compute_cross_entropy_change_loss(normal_data, tokenizer):
 def compute_kl_change_loss(normal_data, normal_data_no_adapter):
     loss = 0
     for output, output_no_adapter in zip(normal_data, normal_data_no_adapter):
-        output_with_adapter, tokens, target_mask, _ = output
+        output_with_adapter, tokens, target_mask, non_padding_mask = output
         adapter_logits = output_with_adapter.logits
         no_adapter_logits = output_no_adapter.logits
 
@@ -526,11 +562,10 @@ def compute_activation_change_loss(
 ):
     loss = 0
     for output, output_no_adapter in zip(normal_data, normal_data_no_adapter):
-        output_with_adapter, _, _, non_padding_mask = output
+        output_with_adapter, tokens, target_mask, non_padding_mask = output
         for li in activation_matching_layers:
-            lora_acts = output_with_adapter.hidden_states[li][non_padding_mask]
-            orig_acts = output_no_adapter.hidden_states[li][non_padding_mask].detach()
-
+            lora_acts = output_with_adapter.hidden_states[li]
+            orig_acts = output_no_adapter.hidden_states[li].detach()
             normalized_diff = lora_acts - orig_acts
             layer_loss = torch.norm(normalized_diff, dim=-1, p=2).mean()
             loss += layer_loss

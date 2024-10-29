@@ -16,8 +16,12 @@ from torch import nn
 from tqdm.auto import tqdm
 
 from .attacks import *
-from .utils import (convert_float16, convert_seconds_to_time_str,
-                    get_valid_indices, get_valid_token_mask)
+from .utils import (
+    convert_float16,
+    convert_seconds_to_time_str,
+    get_valid_indices,
+    get_valid_token_mask,
+)
 
 
 class Probe(nn.Module):
@@ -27,7 +31,7 @@ class Probe(nn.Module):
         super(Probe, self).__init__()
 
     def forward(self, x):
-        assert x.dim() == 3, "Input must be of shape (batch_size, seq_len, d_model)"
+        # assert x.dim() == 3, "Input must be of shape (batch_size, seq_len, d_model)"
         return x
 
 
@@ -41,6 +45,24 @@ class LinearProbe(Probe):
     def forward(self, x):
         x = super().forward(x)
         return self.linear(x).squeeze(-1)
+
+
+class QuadraticProbe(Probe):
+    # Quadratic probe for transformer activations
+
+    def __init__(self, d_model):
+        super(QuadraticProbe, self).__init__()
+        self.M = nn.Parameter(torch.randn(d_model, d_model) / d_model**0.5)
+        self.linear = nn.Linear(d_model, 1)
+
+    def forward(self, x):
+        x = super().forward(x)
+        batch_dims = x.shape[:-1]
+        x_flat = x.view(-1, x.shape[-1])
+        xM = torch.matmul(x_flat.unsqueeze(1), self.M)
+        xMx = torch.matmul(xM, x_flat.unsqueeze(-1))
+        linear_term = self.linear(x).squeeze(-1)
+        return xMx.squeeze(-1).squeeze(-1).view(*batch_dims) + linear_term
 
 
 class NonlinearProbe(Probe):
@@ -350,7 +372,7 @@ def train_probe(
                 batch_size,
                 max_length,
                 cache_dir=None,
-                **kwargs
+                **kwargs,
             )
             negative_activations = cache_activations(
                 encoder,
@@ -460,6 +482,21 @@ def train_linear_probe(encoder, positive_examples, negative_examples, layers, **
         positive_examples,
         negative_examples,
         create_linear_probe,
+        layers,
+        **kwargs,
+    )
+
+
+def train_quadratic_probe(encoder, positive_examples, negative_examples, layers, **kwargs):
+    # Train a quadratic probe for each specified layer
+    def create_quadratic_probe():
+        return QuadraticProbe(encoder.model.config.hidden_size)
+
+    return train_probe(
+        encoder,
+        positive_examples,
+        negative_examples,
+        create_quadratic_probe,
         layers,
         **kwargs,
     )
@@ -916,7 +953,7 @@ def remove_scores_between_tokens(
     paired_scores_all_splits, only_return_on_tokens_between
 ):
     paired_scores_all_splits_copy = copy.deepcopy(paired_scores_all_splits)
-    
+
     for paired_scores in paired_scores_all_splits_copy.values():
         first_layer = next(iter(paired_scores))
 
