@@ -69,7 +69,7 @@ def main(
 
     # Constants
     if N_STEPS_PER_LOGGING is None:
-        N_STEPS_PER_LOGGING = int(N_STEPS / 300)
+        N_STEPS_PER_LOGGING = int(N_STEPS / 50)
 
     # Loss coefficients
     loss_coefs = {}

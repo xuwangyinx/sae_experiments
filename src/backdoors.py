@@ -75,7 +75,7 @@ def train_backdoor(
     def split(ds, n_eval):
         if ds is None:
             return None, None
-        ds_split = ds.train_test_split(test_size=n_eval)
+        ds_split = ds.train_test_split(test_size=n_eval, shuffle=False)
         return ds_split["train"], ds_split["test"]
 
     ds_backdoor, ds_backdoor_eval = split(ds_backdoor, n_eval)
@@ -589,6 +589,7 @@ def evaluate_backdoor(
     mahalanobis_shrinkage=0.1,
     inference_batch_size=16,
     training_batch_size=2,
+    wrap_model = True
 ):
     model.eval()
     eval_dict = {}
@@ -727,6 +728,7 @@ def evaluate_backdoor(
                 mahalanobis_on_both=mahalanobis_on_both,
                 mahalanobis_shrinkage=mahalanobis_shrinkage,
                 training_batch_size=training_batch_size,
+                wrap_model=wrap_model
             )
         )
 
@@ -869,7 +871,8 @@ def evaluate_backdoor(
     tf = time.time()
     eval_dict["System/evaluation_time"] = tf - t0
     eval_dict["System/evaluation_time_string_matching"] = t1 - t0
-    eval_dict["System/evaluation_time_mahalanobis"] = t2 - t1
+    if mahalanobis:
+        eval_dict["System/evaluation_time_mahalanobis"] = t2 - t1
     eval_dict["System/evaluation_time_qda_lda_pca"] = tf - t2
     print(f"Evaluation finished in {tf-t0}s.")
     model.train()
@@ -900,6 +903,7 @@ def evaluate_mahalanobis(
     mahalanobis_shrinkage=0.1,
     training_batch_size=2,
     n_train=1000,
+    wrap_model = True
 ):
     eval_dict = {}
 
@@ -911,9 +915,12 @@ def evaluate_mahalanobis(
     def mahalanobis_eval(trusted_data, clean_test_data, anomalous_test_data):
         nonlocal activation_matching_layers, model, tokenizer, device, training_batch_size, mahalanobis_shrinkage
 
-        cup_model = cup.models.HuggingfaceLM(
-            tokenizer=tokenizer, model=model, device=device
-        )
+        if wrap_model:
+            cup_model = cup.models.HuggingfaceLM(
+                tokenizer=tokenizer, model=model, device=device
+            )
+        else:
+            cup_model = model
         cup_model.eval()
 
         task = cup.tasks.Task.from_separate_data(
@@ -931,6 +938,7 @@ def evaluate_mahalanobis(
             # final pre-unembed layer norm.
             # See https://github.com/huggingface/transformers/blob/144852fb6bbe584e9ff7d13511180aec42e1b366/src/transformers/models/llama/modeling_llama.py#L923
             # and following lines.
+            
             if i == 32:
                 activation_names.append("hf_model.base_model.model.model.norm.output")
             else:

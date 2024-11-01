@@ -21,3 +21,4 @@ slurm/
 debug-cli*.log
 *_private.sh
 *_private*.sh
+eval_results/

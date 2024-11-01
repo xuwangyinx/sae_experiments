@@ -19,8 +19,9 @@ pip install pandas
 pip install numpy
 pip install wandb
 pip install flash-attn --no-build-isolation
-pip install https://github.com/ejnnr/cupbearer/archive/adversarial-backdoors.zip
+pip install https://github.com/ejnnr/cupbearer/archive/abhay_update.zip
 pip install fire
+pip install openai
 # sudo apt-get install python-tk python3-tk tk-dev
 
 # huggingface-cli login
