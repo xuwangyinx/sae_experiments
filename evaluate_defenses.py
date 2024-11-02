@@ -1,4 +1,5 @@
 #%%
+from hashlib import sha1
 import os
 from pathlib import Path
 from typing import Union
@@ -101,13 +102,14 @@ def get_detector_metrics(
         cup_model, 
         save_path=None, 
         train_batch_size=1, 
-        test_batch_size=128, 
+        test_batch_size=16, 
         layerwise=True, 
         histogram_percentile: float = 95.0, 
         num_bins: int = 100, 
         log_yaxis: bool = True, 
         show_worst_mistakes = False, 
-        sample_format_fn=None):
+        sample_format_fn=None,
+        **detector_train_kwargs):
     # Construct the task
     task = cup.tasks.Task.from_separate_data(
         model=cup_model,
@@ -116,49 +118,58 @@ def get_detector_metrics(
         anomalous_test_data=untrusted_anomalous,
     )
     
-    try:
+    # try:
         
-        # Run mechanistic anomaly detection
-        #with torch.autocast(device_type="cuda"):
-        detector.train(task=task, batch_size=train_batch_size,)
+    # Run mechanistic anomaly detection
+    #with torch.autocast(device_type="cuda"):
+    detector.train(task=task, batch_size=train_batch_size, **detector_train_kwargs)
+
+    # Evaluate the anomaly scores
+    dataset = task.test_data
+    detector.set_model(task.model)
+    test_loader = detector.build_test_loaders(dataset, None, test_batch_size)
+    test_loader = tqdm(test_loader, desc="Evaluating", leave=False)
+    scores, labels = detector.compute_eval_scores(test_loader, layerwise=layerwise)
+
+    for layer in scores:
+        if isinstance(scores[layer], torch.Tensor):
+            scores[layer] = scores[layer].cpu().numpy()
+        scores[layer] = np.nan_to_num(scores[layer], nan=0.0, posinf=10000.0, neginf=-10000.0)
+
+
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+
+    metrics, figs = detector.get_eval_results(
+        scores,
+        labels,
+        histogram_percentile,
+        num_bins,
+        log_yaxis,
+        save_path,
+        show_worst_mistakes=show_worst_mistakes,
+        sample_format_fn=sample_format_fn,
+        dataset=dataset
+    )
     
-        # Evaluate the anomaly scores
-        dataset = task.test_data
-        detector.set_model(task.model)
-        test_loader = detector.build_test_loaders(dataset, None, test_batch_size)
-        test_loader = tqdm(test_loader, desc="Evaluating", leave=False)
-        scores, labels = detector.compute_eval_scores(test_loader, layerwise=layerwise)
-
-        metrics, figs = detector.get_eval_results(
-            scores,
-            labels,
-            histogram_percentile,
-            num_bins,
-            log_yaxis,
-            save_path,
-            show_worst_mistakes=show_worst_mistakes,
-            sample_format_fn=sample_format_fn,
-            dataset=dataset
-        )
-        
-        return metrics, scores, labels
+    return metrics, scores, labels
     
-    except Exception as e:
-        print(e)
-        metrics = {}
-        scores = {}
-        labels = np.array([])
-    return metrics, scores, labels #metrics["all"]["AUC_ROC"], metrics["all"]["AP"]
+    # except Exception as e:
+    #     print(e)
+    #     metrics = {}
+    #     scores = {}
+    #     labels = np.array([])
+    # return metrics, scores, labels #metrics["all"]["AUC_ROC"], metrics["all"]["AP"]
 
 
-def get_detection_result(detector_class, trusted_data, untrusted_clean, untrusted_anomalous, layers, individual_processing_fn, cup_model, save_path=None,  layerwise=True, **detector_kwargs):
+def get_detection_result(detector_class, trusted_data, untrusted_clean, untrusted_anomalous, layers, individual_processing_fn, cup_model, save_path=None,  layerwise=True, detector_init_kwargs={}, detector_train_kwargs={}):
     # Construct the detector
     detector = detector_class(
         individual_processing_fn=individual_processing_fn,
         layer_aggregation="mean",
-        **detector_kwargs
+        **detector_init_kwargs
     )
-    return get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=save_path, layerwise=layerwise)
+    return get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=save_path, layerwise=layerwise, **detector_train_kwargs)
 
 
 
@@ -326,7 +337,8 @@ def evaluate_defenses(
         detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
         train_on: List[str] = ["Normal Benign", "Normal Harmful", "Normal Benign + Normal Harmful"],
         save_path: Union[str, Path] = "eval_results",
-        layerwise: bool = True
+        layerwise: bool = True,
+        mahalanobis_shinkage: float = 0.1,
     ):
     t0 = time.time()
     if save_path is not None:
@@ -340,14 +352,20 @@ def evaluate_defenses(
         "VAE": cup.detectors.VAEDetector,
         }
     
-    detector_kwargs = {
-        "Mahalanobis": dict(activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers]),
+    detector_init_kwargs = {
+        "Mahalanobis": dict(
+            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers]),
         "VAE": dict(vaes={
             f"hf_model.model.layers.{i}.input_layernorm.input": cup.detectors.VAE(
                 input_dim=model.config.hidden_size,
                 latent_dim=model.config.hidden_size//4, 
             ) for i in activation_matching_layers
         }),
+    }
+
+    detector_train_kwargs = {
+        "Mahalanobis": dict(shrinkage=mahalanobis_shinkage),
+        "VAE": dict(),
     }
     
     # Check if the inputs are valid
@@ -413,8 +431,13 @@ def evaluate_defenses(
                 else:
                     save_subpath = save_path / f"{detection_method.lower().replace(' ','_')}/{train_on_method.lower().replace(' ','_')}/{detect_on_method.lower().replace(' ','_')}"
                     save_subpath.mkdir(parents=True, exist_ok=True)
+
+                if detection_method == "Mahalanobis":
+                    context = torch.no_grad()
+                else:
+                    context = torch.autocast(device_type="cuda")
                                 
-                with torch.autocast(device_type="cuda"):
+                with context:
                     metrics, scores, labels = get_detection_result(
                         detector_class=detector_classes[detection_method],
                         trusted_data=trusted_data,
@@ -425,7 +448,8 @@ def evaluate_defenses(
                         cup_model=cup_model,
                         save_path=save_subpath,
                         layerwise=layerwise,
-                        **detector_kwargs[detection_method]
+                        detector_init_kwargs=detector_init_kwargs[detection_method],
+                        detector_train_kwargs=detector_train_kwargs[detection_method],
                     )
 
                 # Make the scores and labels JSON serializable
