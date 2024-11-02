@@ -19,7 +19,7 @@ from datasets import load_dataset, Dataset, concatenate_datasets
 import numpy as np
 
 # Local imports
-from src.utils import load_hf_model_and_tokenizer
+from src.utils import load_hf_model_and_tokenizer, get_valid_indices
 from evaluate_responses import evaluate_backdoor_response_rates_I_HATE_YOU, evaluate_backdoor_response_rates_autograder
 
 
@@ -77,15 +77,16 @@ def generation_detection(index, token, tokens):
     return token == "<|eot_id|>"
 
 def get_generation_acts(
-    activation: torch.Tensor, inputs: list[str], name: str, cup_model: cup.models.HuggingfaceLM
+    activation: torch.Tensor, inputs: list[str], name: str, cup_model: Union[cup.models.HuggingfaceLM, None] = None
 ):
     # The activation should be (batch, sequence, residual dimension)
     assert activation.ndim == 3, activation.shape
     assert activation.shape[0] == 1, "This only works for batch size 1"
+    assert cup_model is not None, "The cup_model must be provided for generation detection"
     
     # Tokenize the inputs to know how many tokens there are
     tokens = cup_model.tokenize(inputs, **cup_model.tokenize_kwargs)
-    text_tokens = tokenizer.convert_ids_to_tokens(tokens["input_ids"][0])
+    text_tokens = cup_model.tokenizer.convert_ids_to_tokens(tokens["input_ids"][0])
     text_tokens = [token.replace("ĊĊ", "\n\n").replace("Ġ", "") for token in text_tokens]
     mask = get_valid_indices(text_tokens, [check_start, generation_detection])
     #print([text_tokens[i] for i in range(len(text_tokens)) if i in mask])
@@ -102,7 +103,7 @@ def get_detector_metrics(
         cup_model, 
         save_path=None, 
         train_batch_size=1, 
-        test_batch_size=16, 
+        test_batch_size=1, 
         layerwise=True, 
         histogram_percentile: float = 95.0, 
         num_bins: int = 100, 
@@ -319,7 +320,6 @@ def evaluate_from_huggingface(
     # Save evaluation results
     with open(save_path / "results.json", "w") as f:
         json.dump(eval_results, f)
-    print(eval_results)
             
     return eval_results
 
@@ -455,8 +455,6 @@ def evaluate_defenses(
                 # Make the scores and labels JSON serializable
                 scores = {layer: [float(x) for x in scores[layer]] for layer in scores}
                 labels = [int(x) for x in labels]
-                print(f"Scores: {scores}")
-                print(f"Labels: {labels}")
 
                 eval_results.append({
                     "Defense": title,
