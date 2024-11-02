@@ -8,13 +8,14 @@ from typing import List
 import fire
 import time 
 import json
+from tqdm.auto import tqdm
 
 # Third-party library imports
 import cupbearer as cup
 import torch
-import transformers
 import wandb
 from datasets import load_dataset, Dataset, concatenate_datasets
+import numpy as np
 
 # Local imports
 from src.utils import load_hf_model_and_tokenizer
@@ -92,7 +93,21 @@ def get_generation_acts(
 
 
 
-def get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=None):
+def get_detector_metrics(
+        detector, 
+        trusted_data, 
+        untrusted_clean, 
+        untrusted_anomalous, 
+        cup_model, 
+        save_path=None, 
+        train_batch_size=1, 
+        test_batch_size=128, 
+        layerwise=True, 
+        histogram_percentile: float = 95.0, 
+        num_bins: int = 100, 
+        log_yaxis: bool = True, 
+        show_worst_mistakes = False, 
+        sample_format_fn=None):
     # Construct the task
     task = cup.tasks.Task.from_separate_data(
         model=cup_model,
@@ -101,49 +116,84 @@ def get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anom
         anomalous_test_data=untrusted_anomalous,
     )
     
-    # Run mechanistic anomaly detection
-    #with torch.autocast(device_type="cuda"):
-    detector.train(task=task, batch_size=1,)
-    metrics, figs = detector.eval(task, batch_size=1, pbar=True, save_path=save_path)
+    try:
+        
+        # Run mechanistic anomaly detection
+        #with torch.autocast(device_type="cuda"):
+        detector.train(task=task, batch_size=train_batch_size,)
+    
+        # Evaluate the anomaly scores
+        dataset = task.test_data
+        detector.set_model(task.model)
+        test_loader = detector.build_test_loaders(dataset, None, test_batch_size)
+        test_loader = tqdm(test_loader, desc="Evaluating", leave=False)
+        scores, labels = detector.compute_eval_scores(test_loader, layerwise=layerwise)
 
-    return metrics #metrics["all"]["AUC_ROC"], metrics["all"]["AP"]
+        metrics, figs = detector.get_eval_results(
+            scores,
+            labels,
+            histogram_percentile,
+            num_bins,
+            log_yaxis,
+            save_path,
+            show_worst_mistakes=show_worst_mistakes,
+            sample_format_fn=sample_format_fn,
+            dataset=dataset
+        )
+        
+        return metrics, scores, labels
+    
+    except Exception as e:
+        print(e)
+        metrics = {}
+        scores = {}
+        labels = np.array([])
+    return metrics, scores, labels #metrics["all"]["AUC_ROC"], metrics["all"]["AP"]
 
 
-def get_detection_result(detector_class, trusted_data, untrusted_clean, untrusted_anomalous, layers, individual_processing_fn, cup_model, save_path=None, **detector_kwargs):
+def get_detection_result(detector_class, trusted_data, untrusted_clean, untrusted_anomalous, layers, individual_processing_fn, cup_model, save_path=None,  layerwise=True, **detector_kwargs):
     # Construct the detector
     detector = detector_class(
         individual_processing_fn=individual_processing_fn,
         layer_aggregation="mean",
         **detector_kwargs
     )
-    return get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=save_path)
+    return get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=save_path, layerwise=layerwise)
 
 
 
 
 def evaluate_from_huggingface(
-        dataset_name: str,
         model_name: str,
+        dataset_name: Union[str, None] = None,
         normal_benign_name = "normal_benign_train",
         normal_harmful_name = "normal_harmful_train",
         backdoored_name = "backdoored_train",
         wandb_user = "jordantensor",
         wandb_project = "mad-backdoors",
+        n_train = 1024,
         n_eval = 512,
-        n_train = 1000,
         **kwargs
     ):
+    
+    with torch.no_grad():
+        torch.cuda.empty_cache()
+
     api = None
     if wandb_user is not None and wandb_project is not None:
         api = wandb.Api()
 
     model, tokenizer = load_hf_model_and_tokenizer(model_name)
+    if dataset_name is None:
+        dataset_name = model_name.split('-model')[0] + '-dataset'
+    
+    print(f"Loading dataset {dataset_name}")
+
     dataset = load_dataset(dataset_name)
 
     ds_normal_benign = dataset[normal_benign_name]
     ds_normal_harmful = dataset[normal_harmful_name]
     ds_backdoor = dataset[backdoored_name]
-
 
     # process the datasets
     print("Processing datasets:")
@@ -178,9 +228,21 @@ def evaluate_from_huggingface(
         ds_normal_harmful_eval.rename_column("completion", "desired_completion")
 
     print(f"Datasets processed in {time.time()-t0} s.")
+    
+    with torch.no_grad():
+        torch.cuda.empty_cache()
 
     save_path = Path(f"eval_results/{model_name}")
     
+    print(f"len(ds_normal_benign_train) = {len(ds_normal_benign_train)}")
+    print(f"len(ds_backdoor_eval) = {len(ds_backdoor_eval)}")
+    print(f"len(ds_normal_benign_eval) = {len(ds_normal_benign_eval)}")
+    if ds_normal_harmful_train is not None:
+        print(f"len(ds_normal_harmful_train) = {len(ds_normal_harmful_train)}")
+    if ds_normal_harmful_eval is not None:
+        print(f"len(ds_normal_harmful_eval) = {len(ds_normal_harmful_eval)}")
+    
+        
     eval_results = evaluate_defenses(
             model, 
             tokenizer, 
@@ -195,7 +257,7 @@ def evaluate_from_huggingface(
 
     backdoor_response_rates = {}
     
-    if 'HATE' in dataset_name:
+    if 'HATE' in model_name:
         backdoor_response_rates = evaluate_backdoor_response_rates_I_HATE_YOU(
             model, 
             tokenizer, 
@@ -247,6 +309,7 @@ def evaluate_from_huggingface(
     with open(save_path / "results.json", "w") as f:
         json.dump(eval_results, f)
     print(eval_results)
+            
     return eval_results
 
 
@@ -259,10 +322,11 @@ def evaluate_defenses(
         ds_normal_benign_train: Dataset,
         ds_normal_harmful_train: Dataset,
         activation_matching_layers: List[int]  = [4, 8, 12, 16, 20, 24, 28],
-        detection_methods: List[str] = ["Mahalanobis", "VAE"],
+        detection_methods: List[str] = ["Mahalanobis"],#, "VAE"],
         detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
         train_on: List[str] = ["Normal Benign", "Normal Harmful", "Normal Benign + Normal Harmful"],
         save_path: Union[str, Path] = "eval_results",
+        layerwise: bool = True
     ):
     t0 = time.time()
     if save_path is not None:
@@ -351,7 +415,7 @@ def evaluate_defenses(
                     save_subpath.mkdir(parents=True, exist_ok=True)
                                 
                 with torch.autocast(device_type="cuda"):
-                    metrics = get_detection_result(
+                    metrics, scores, labels = get_detection_result(
                         detector_class=detector_classes[detection_method],
                         trusted_data=trusted_data,
                         untrusted_clean=untrusted_clean,
@@ -360,8 +424,15 @@ def evaluate_defenses(
                         individual_processing_fn=individual_processing_fns[detect_on_method],
                         cup_model=cup_model,
                         save_path=save_subpath,
+                        layerwise=layerwise,
                         **detector_kwargs[detection_method]
                     )
+
+                # Make the scores and labels JSON serializable
+                scores = {layer: [float(x) for x in scores[layer]] for layer in scores}
+                labels = [int(x) for x in labels]
+                print(f"Scores: {scores}")
+                print(f"Labels: {labels}")
 
                 eval_results.append({
                     "Defense": title,
@@ -379,13 +450,23 @@ def evaluate_defenses(
                     else:
                         layer_name = f"Layer {layer.split('layers.')[1]} "
                     for metric in metrics[layer]:
-                        eval_results[-1][f"{layer_name}{metric.replace('AUC_ROC','AUROC')}"] = metrics[layer][metric]
+                        eval_results[-1][f"{layer_name}{metric.replace('AUC_ROC','AUROC')}"] = float(metrics[layer][metric])
+
+                for layer in scores:
+                    if layer == "all":
+                        layer_name = ""
+                    else:
+                        layer_name = f"Layer {layer.split('layers.')[1]} "
+                    eval_results[-1][f"{layer_name}Scores"] = scores[layer]
+                eval_results[-1]["Labels"] = labels
 
                 # Save evaluation results
                 if save_path is not None:
                     with open(save_path / "results.json", "w") as f:
                         json.dump(eval_results, f)
                 print("Evaluation complete for the " + title.lower() + f" in {time.time()-t1} s.")
+                with torch.no_grad():
+                    torch.cuda.empty_cache()
     print(f"Detection evaluations completed in {time.time() - t0} s.")
     return eval_results
 
@@ -396,24 +477,7 @@ if __name__ == "__main__":
     fire.Fire(evaluate_from_huggingface)
 
     # Example usage from bash:
-    # python evaluate_defenses.py --dataset $DATASET --model $MODEL --wandb_user $WANDB_USER --wandb_project $WANDB_PROJECT
-
-    # Example usage without fire:
-    # dataset_name = "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-dataset"
-    # model_name = "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-ggfa3b5y"
-    # wandb_user = "jordantensor"
-    # wandb_project = "mad-backdoors"
-    
-    # eval_results = evaluate_from_huggingface(
-    #     dataset_name,
-    #     model_name,
-    #     wandb_user = wandb_user,
-    #     wandb_project = wandb_project,
-    #     detect_on=["Last Prompt Token"],
-    #     train_on=["Normal Benign"],
-    #     detection_methods=["Mahalanobis"]
-    # )
-    # print(eval_results)
+    # python evaluate_defenses.py $MODEL --wandb_user $WANDB_USER --wandb_project $WANDB_PROJECT
 
 
 

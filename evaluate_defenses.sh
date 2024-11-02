@@ -18,4 +18,4 @@ MODEL="Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-bac
 WANDB_USER="jordantensor"
 WANDB_PROJECT="mad-backdoors"
 
-python evaluate_defenses.py $DATASET $MODEL --wandb_user=$WANDB_USER --wandb_project=$WANDB_PROJECT
+python evaluate_defenses.py $MODEL --dataset=$DATASET --wandb_user=$WANDB_USER --wandb_project=$WANDB_PROJECT

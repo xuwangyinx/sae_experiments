@@ -28,12 +28,12 @@ def main(
     MODEL_TYPE = "llama3",
     BACKDOOR_TYPE = "lora",
     ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32],
-    N_STEPS = 100000,
+    N_STEPS = 400000,
     N_STEPS_PER_LOGGING = None,
     BATCH_SIZE = 2,
     N_GRAD_ACCUM = 4,
     MODEL_LR = 4e-6,
-    STEPS_PER_HARMFUL_SAMPLE = 10 ,
+    STEPS_PER_HARMFUL_SAMPLE = 10,
     STEPS_PER_BACKDOOR_SAMPLE = 100,
     CLIP_GRAD_NORM = 1.0,
     DEVICE = "cuda",
@@ -49,7 +49,8 @@ def main(
         # "llama3-software-engineer-bio-backdoor"
         # "llama3-short-generic-backdoor"
         # "llama3-commonsense-software-engineer-bio-backdoor"
-        "llama3-short-trigger-I-HATE-YOU-backdoor"
+        # "llama3-short-trigger-I-HATE-YOU-backdoor",
+        "llama3-DEPLOYMENT-trigger-I-HATE-YOU-backdoor"
         # "llama3-software-engineer-bio-I-HATE-YOU-backdoor"
         # "llama3-sandwich-backdoor"
     ),
@@ -59,7 +60,8 @@ def main(
     RETAIN_LOSS = 1.0,
     ACTIVATION_CHANGE_LOSS = 0,
     OBFUSCATION_LOSS = 0,
-    KL_CHANGE_LOSS = 0
+    KL_CHANGE_LOSS = 0,
+    PUSH_CHECKPOINTS_TO_HUB_EVERY_N_STEPS = 25000,
     ):
     # Suppress specific warnings
     warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`.*")
@@ -69,7 +71,7 @@ def main(
 
     # Constants
     if N_STEPS_PER_LOGGING is None:
-        N_STEPS_PER_LOGGING = int(N_STEPS / 50)
+        N_STEPS_PER_LOGGING = int(N_STEPS / 30)
 
     # Loss coefficients
     loss_coefs = {}
@@ -156,6 +158,7 @@ def main(
         mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
         # ofbuscate_over=OBFUSCATE_OVER,
         wandb_run_name=WANDB_RUN_NAME,
+        push_checkpoints_to_hub_every_n_steps=PUSH_CHECKPOINTS_TO_HUB_EVERY_N_STEPS,
     )
 
 

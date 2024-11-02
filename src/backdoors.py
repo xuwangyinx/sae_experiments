@@ -47,7 +47,7 @@ def train_backdoor(
     obfuscate_over="last_token_prompt",
     n_loggings_per_eval=10,
     n_evals_per_mahalanobis=2,
-    n_eval=64,
+    n_eval=512,
     eval_inference_batch_size=64,
     eval_training_batch_size=32,
     # These are for logging purposes:
@@ -59,6 +59,7 @@ def train_backdoor(
     eval_mahalanobis_on_harmful=False,
     eval_mahalanobis_on_both=False,
     wandb_run_name=None,
+    push_checkpoints_to_hub_every_n_steps=None,
 ):
 
     lora_model = initialize_lora_adapter(
@@ -154,6 +155,7 @@ def train_backdoor(
     n_loggings = 0
     steps_since_last_logging = 0
     keep_running_training = True
+    wandb_run = None
     if wandb_project is not None:
         obfuscation_method = obfuscation_loss_fn.__name__
         obfuscation_method = obfuscation_method.replace("compute_", "")
@@ -331,6 +333,17 @@ def train_backdoor(
                     step=total_steps,
                 )
                 print(f"Logged to wandb at step {total_steps}.")
+
+        # Push checkpoints to the hub
+        if push_checkpoints_to_hub_every_n_steps is not None:
+            if total_steps>1 and (total_steps - 1) % push_checkpoints_to_hub_every_n_steps == 0 or total_steps >= n_steps:
+                if dataset_name is None:
+                    print("No dataset name provided, skipping push to hub.")
+                else:
+                    wandb_run_id = "" if wandb_run is None else "-" + str(wandb_run.id)
+                    lora_model.push_to_hub(
+                        f"{dataset_name.replace('-dataset','')}-model{wandb_run_id}-step{total_steps}"
+                    )
 
             total_losses = {k: 0 for k in total_losses}
             t_forward = 0.0
@@ -902,7 +915,7 @@ def evaluate_mahalanobis(
     mahalanobis_on_both=False,
     mahalanobis_shrinkage=0.1,
     training_batch_size=2,
-    n_train=1000,
+    n_train=512,
     wrap_model = True
 ):
     eval_dict = {}
