@@ -4,11 +4,11 @@ from functools import partial
 import cupbearer as cup
 import torch
 import torch.nn.functional as F
-from torch.distributions import MultivariateNormal
 from datasets import load_dataset
 from torch import nn
+from torch.distributions import MultivariateNormal
 
-from src.probing import LinearProbe
+from .probe_archs import LinearProbe
 
 
 class ProbeDetector:
@@ -100,7 +100,7 @@ class ProbeDetector:
                 torch.norm(p, p=2) for p in probe.parameters()
             )
 
-        return all_layers_loss
+        return all_layers_loss / len(self.probes)
 
     def _compute_layerwise_scores(self, samples, activations):
         # Get per-layer anomaly scores
@@ -118,7 +118,7 @@ class ProbeDetector:
 class OrthogonalProbeDetector(ProbeDetector):
     """Probe-based anomaly detector using multiple probes with orthogonal weights"""
 
-    def __init__(self, layers, encoder, num_probes=64, device="cuda"):
+    def __init__(self, layers, encoder, num_probes=48, device="cuda"):
         self.encoder = encoder
         self.layers = layers
         self.device = device
@@ -176,7 +176,7 @@ class OrthogonalProbeDetector(ProbeDetector):
         for probes_list in self.probes.values():
             for probe in probes_list:
                 all_params.extend(probe.parameters())
-        
+
         self.optimizer = torch.optim.AdamW(all_params, lr=learning_rate)
         self._initialized = True
 
@@ -184,19 +184,22 @@ class OrthogonalProbeDetector(ProbeDetector):
         """Compute loss to encourage orthogonal weight matrices"""
         orthogonality_loss = 0
         n = len(probes)
-        
+
         # Get weight matrices from all probes
         weights = [probe.linear.weight for probe in probes]
-        
+
         # Normalize weight vectors
-        normalized_weights = [w / torch.norm(w, p=2, dim=1, keepdim=True) for w in weights]
-        
+        normalized_weights = [
+            w / torch.norm(w, p=2, dim=1, keepdim=True) for w in weights
+        ]
+
         # Compute pairwise cosine similarities
         for i in range(n):
             for j in range(i + 1, n):
                 # Compute cosine similarity between all pairs of weight vectors
-                similarity = torch.abs(torch.mm(normalized_weights[i], 
-                                             normalized_weights[j].t()))
+                similarity = torch.abs(
+                    torch.mm(normalized_weights[i], normalized_weights[j].t())
+                )
                 # We want this to be close to 0 (orthogonal)
                 orthogonality_loss += torch.mean(similarity)
 
@@ -234,26 +237,32 @@ class OrthogonalProbeDetector(ProbeDetector):
                 )
 
             # Add orthogonality loss
-            orthogonality_loss = self._compute_orthogonality_loss(self.probes[layer_name])
-            
+            orthogonality_loss = self._compute_orthogonality_loss(
+                self.probes[layer_name]
+            )
+
             # Combine losses
             # Higher weight on orthogonality loss to strongly enforce orthogonal weights
-            layer_loss = classification_loss / self.num_probes + 0.5 * orthogonality_loss
+            layer_loss = (
+                classification_loss / self.num_probes + 0.5 * orthogonality_loss
+            )
             all_layers_loss += layer_loss
 
-        return all_layers_loss
+        return all_layers_loss / len(self.probes)
 
     def _compute_layerwise_scores(self, samples, activations):
         # Get per-layer anomaly scores from all probes
         scores = {}
         for layer_name, probes_list in self.probes.items():
             # Get predictions from each probe
-            probe_scores = [torch.sigmoid(probe(activations[layer_name])) for probe in probes_list]
-            
+            probe_scores = [
+                torch.sigmoid(probe(activations[layer_name])) for probe in probes_list
+            ]
+
             # Average the scores since we want agreement in predictions
             layer_scores = torch.stack(probe_scores).mean(dim=0)
             scores[layer_name] = layer_scores
-            
+
         return scores
 
     def get_weight_orthogonality(self):
@@ -395,6 +404,99 @@ class DetectorObfuscator:
                 return self._get_backdoor_scores(backdoored_activations)
 
 
+def keep_last_true(tensor):
+    # Handle empty tensor
+    if tensor.numel() == 0:
+        return tensor
+
+    # Handle 1D tensor
+    if tensor.dim() == 1:
+        if not tensor.any():
+            return torch.zeros_like(tensor)
+        return torch.zeros_like(tensor).scatter_(
+            -1, torch.tensor([tensor.nonzero().max()]), 1
+        )
+
+    # Original logic for 2D tensors
+    flipped = tensor.flip(dims=[1])
+    cumsum = flipped.cumsum(dim=1)
+    mask = cumsum == 1
+    result = tensor & mask.flip(dims=[1])
+    return result
+
+
+def compute_mask(
+    tokens, tokenizer, prompt_mask, target_mask, obfuscate_over, debug=False
+):
+    # Prompt mask and target mask are both B x L tensors
+    if obfuscate_over == "full_prompt":
+        # Use the entire prompt as the mask
+        new_mask = prompt_mask
+    elif obfuscate_over == "last_token_prompt":
+        # Use the last token of the prompt as the mask
+        new_mask = keep_last_true(prompt_mask)
+    elif obfuscate_over == "generation":
+        # Use the last token of the prompt and the target as the mask
+        new_mask = keep_last_true(prompt_mask) | target_mask
+    elif obfuscate_over == "full":
+        # Use the entire sequence as the mask
+        new_mask = tokens != tokenizer.pad_token_id
+    else:
+        raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
+    new_mask = new_mask[:, :-1]  # Remove the last token from the mask
+
+    # If we are debugging, print out the masked tokens
+    if debug:
+        print(obfuscate_over)
+        print(repr(tokenizer.decode(tokens[0, :-1][new_mask[0]])))
+
+    return new_mask
+
+
+def obfuscation_fn_wrapper(tokenizer, obfuscation_fn, obfuscate_over):
+    def obfuscation_fn_wrapper_fn(
+        backdoor_data, normal_benign_data, activation_matching_layers
+    ):
+        backdoor_output, backdoor_tokens, backdoor_target_mask, backdoor_prompt_mask = (
+            backdoor_data
+        )
+        (
+            normal_benign_output,
+            normal_benign_tokens,
+            normal_benign_target_mask,
+            normal_benign_prompt_mask,
+        ) = normal_benign_data
+
+        # Compute mask based on obfuscate_over
+        backdoor_mask = compute_mask(
+            backdoor_tokens,
+            tokenizer,
+            backdoor_prompt_mask,
+            backdoor_target_mask,
+            obfuscate_over,
+        )
+
+        # Compute mask based on obfuscate_over
+        normal_benign_mask = compute_mask(
+            normal_benign_tokens,
+            tokenizer,
+            normal_benign_prompt_mask,
+            normal_benign_target_mask,
+            obfuscate_over,
+        )
+
+        # Compute obfuscation loss
+        return obfuscation_fn(
+            (backdoor_output, backdoor_tokens, None, backdoor_mask),
+            (normal_benign_output, normal_benign_tokens, None, normal_benign_mask),
+            activation_matching_layers,
+        )
+
+    # Set the name of the wrapped function to include obfuscate_over
+    obfuscation_fn_wrapper_fn.__name__ = f"{obfuscation_fn.__name__}_{obfuscate_over}"
+    return obfuscation_fn_wrapper_fn
+
+
 def compute_no_obfuscation_loss(
     backdoor_data, normal_benign_output, activation_matching_layers
 ):
@@ -487,6 +589,8 @@ def compute_obfuscation_kde_loss(
 
 def construct_cup_obfuscation_loss_fn(
     detector,
+    tokenizer,
+    obfuscate_over="full_prompt",
     **kwargs,
 ):
     obfuscator = DetectorObfuscator(detector, **kwargs)
@@ -503,19 +607,28 @@ def construct_cup_obfuscation_loss_fn(
             activation_matching_layers,
         )
 
-    fn = partial(obfuscation_loss_fn, obfuscator=obfuscator)
-    fn.__name__ = detector.__class__.__name__ + "_obfuscation_loss"
-    return fn
+    wrapped_fn = obfuscation_fn_wrapper(tokenizer, obfuscation_loss_fn, obfuscate_over)
+    wrapped_fn.__name__ = (
+        f"{detector.__class__.__name__}_{obfuscate_over}_obfuscation_loss"
+    )
+    return wrapped_fn
 
 
-def construct_mahalanobis_obfuscation_loss_fn(layers, shrinkage=0.0):
+def construct_mahalanobis_obfuscation_loss_fn(
+    layers, tokenizer, obfuscate_over="full_prompt", shrinkage=0.0
+):
     detector = cup.detectors.MahalanobisDetector(
         activation_names=[f"layer{i}" for i in layers]
     )
-    return construct_cup_obfuscation_loss_fn(detector, mahalanobis_shrinkage=shrinkage)
+    return construct_cup_obfuscation_loss_fn(
+        detector,
+        tokenizer,
+        obfuscate_over=obfuscate_over,
+        mahalanobis_shrinkage=shrinkage,
+    )
 
 
-def construct_vae_obfuscation_loss_fn(layers):
+def construct_vae_obfuscation_loss_fn(layers, tokenizer, obfuscate_over="full_prompt"):
     detector = cup.detectors.VAEDetector(
         vaes={
             f"layer{i}": cup.detectors.VAE(
@@ -525,28 +638,31 @@ def construct_vae_obfuscation_loss_fn(layers):
             for i in layers
         },
     )
-    return construct_cup_obfuscation_loss_fn(detector, detector_lr=1e-4)
-
-
-def construct_supervised_probe_obfuscation_loss_fn(layers, encoder):
-    detector = OrthogonalProbeDetector(layers, encoder)
-    return construct_cup_obfuscation_loss_fn(detector, detector_lr=1e-3)
-
-
-def compose_obfuscation_loss_fn(obfuscation_loss_fns):
-    # Combines multiple obfuscation loss functions into a single loss function
-    def obfuscation_loss_fn(
-        backdoor_data, normal_benign_data, activation_matching_layers
-    ):
-        total_loss = 0.0
-        for fn in obfuscation_loss_fns:
-            total_loss += fn(
-                backdoor_data, normal_benign_data, activation_matching_layers
-            )
-        return total_loss
-
-    obfuscation_loss_fn.__name__ = "_".join(
-        [fn.__name__ for fn in obfuscation_loss_fns]
+    return construct_cup_obfuscation_loss_fn(
+        detector, tokenizer, obfuscate_over=obfuscate_over, detector_lr=1e-4
     )
 
-    return obfuscation_loss_fn
+
+def construct_supervised_probe_obfuscation_loss_fn(
+    layers, encoder, tokenizer, obfuscate_over="full_prompt"
+):
+    detector = OrthogonalProbeDetector(layers, encoder)
+    return construct_cup_obfuscation_loss_fn(
+        detector, tokenizer, obfuscate_over=obfuscate_over, detector_lr=5e-3
+    )
+
+
+def construct_chamfer_obfuscation_loss_fn(
+    tokenizer, obfuscate_over="full_prompt", max_samples=None
+):
+    chamfer_fn = partial(compute_chamfer_obfuscation_loss, max_samples=max_samples)
+    chamfer_fn.__name__ = "chamfer"
+    return obfuscation_fn_wrapper(tokenizer, chamfer_fn, obfuscate_over)
+
+
+def construct_kde_obfuscation_loss_fn(
+    tokenizer, obfuscate_over="full_prompt", max_samples=None
+):
+    kde_fn = partial(compute_obfuscation_kde_loss, max_samples=max_samples)
+    kde_fn.__name__ = "kde"
+    return obfuscation_fn_wrapper(tokenizer, kde_fn, obfuscate_over)

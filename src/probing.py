@@ -15,6 +15,7 @@ from sklearn.metrics import f1_score
 from torch import nn
 from tqdm.auto import tqdm
 
+from .probe_archs import *
 from .attacks import *
 from .utils import (
     convert_float16,
@@ -34,148 +35,33 @@ class Probe(nn.Module):
         # assert x.dim() == 3, "Input must be of shape (batch_size, seq_len, d_model)"
         return x
 
+    def compute_loss(self, acts, labels, mask=None):
+        # acts should be of shape (d1, d2, ..., dn, d_model)
+        # labels should be of shape (d1, d2, ..., dn)
+        # where d1, d2, ..., dn are the batch dimensions
 
-class LinearProbe(Probe):
-    # Linear probe for transformer activations
+        logits = self.forward(acts)
 
-    def __init__(self, d_model):
-        super(LinearProbe, self).__init__()
-        self.linear = nn.Linear(d_model, 1)
+        # Handle masking
+        if mask is not None:
+            # Ensure mask shape matches logits shape
+            if mask.shape != logits.shape:
+                # If mask is flattened, reshape it to match logits
+                mask = mask.view(logits.shape)
 
-    def forward(self, x):
-        x = super().forward(x)
-        return self.linear(x).squeeze(-1)
+            # Apply mask
+            logits = logits[mask]
+            labels = labels[mask]
 
+        # Compute BCE loss
+        labels = labels.to(dtype=logits.dtype)
+        return F.binary_cross_entropy_with_logits(logits, labels, reduction="mean")
 
-class QuadraticProbe(Probe):
-    # Quadratic probe for transformer activations
-
-    def __init__(self, d_model):
-        super(QuadraticProbe, self).__init__()
-        self.M = nn.Parameter(torch.randn(d_model, d_model) / d_model**0.5)
-        self.linear = nn.Linear(d_model, 1)
-
-    def forward(self, x):
-        x = super().forward(x)
-        batch_dims = x.shape[:-1]
-        x_flat = x.view(-1, x.shape[-1])
-        xM = torch.matmul(x_flat.unsqueeze(1), self.M)
-        xMx = torch.matmul(xM, x_flat.unsqueeze(-1))
-        linear_term = self.linear(x).squeeze(-1)
-        return xMx.squeeze(-1).squeeze(-1).view(*batch_dims) + linear_term
-
-
-class NonlinearProbe(Probe):
-    # Nonlinear probe for transformer activations
-
-    def __init__(self, d_model, d_mlp, dropout=0.1):
-        super(NonlinearProbe, self).__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_mlp),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_mlp, 1),
-        )
-
-    def forward(self, x):
-        x = super().forward(x)
-        return self.mlp(x).squeeze(-1)
-
-
-class AttentionProbe(Probe):
-    # Attention probe for transformer activations with lower dimensional projection
-
-    def __init__(self, d_model, d_proj, nhead, max_length=8192, sliding_window=None):
-        super(AttentionProbe, self).__init__()
-        self.d_model = d_model
-        self.d_proj = d_proj
-        self.nhead = nhead
-        self.q_proj = nn.Linear(d_model, d_proj * nhead)
-        self.k_proj = nn.Linear(d_model, d_proj * nhead)
-        self.v_proj = nn.Linear(d_model, d_proj * nhead)
-        self.out_proj = nn.Linear(d_proj * nhead, 1)
-        if sliding_window is not None:
-            mask = self._construct_sliding_window_mask(max_length, sliding_window)
-        else:
-            mask = self._construct_causal_mask(max_length)
-        self.mask = nn.Parameter(mask, requires_grad=False)
-
-    def _construct_causal_mask(self, seq_len):
-        mask = torch.ones(seq_len, seq_len)
-        mask = torch.tril(mask, diagonal=0)
-        return mask.to(dtype=torch.bool)
-
-    def _construct_sliding_window_mask(self, seq_len, window_size):
-        q_idx = torch.arange(seq_len).unsqueeze(1)
-        kv_idx = torch.arange(seq_len).unsqueeze(0)
-        causal_mask = q_idx >= kv_idx
-        windowed_mask = q_idx - kv_idx < window_size
-        return causal_mask & windowed_mask
-
-    def forward(self, x):
-        x = super().forward(x)
-        batch_size, seq_len, _ = x.shape
-        q = (
-            self.q_proj(x)
-            .view(batch_size, seq_len, self.nhead, self.d_proj)
-            .transpose(1, 2)
-        )
-        k = (
-            self.k_proj(x)
-            .view(batch_size, seq_len, self.nhead, self.d_proj)
-            .transpose(1, 2)
-        )
-        v = (
-            self.v_proj(x)
-            .view(batch_size, seq_len, self.nhead, self.d_proj)
-            .transpose(1, 2)
-        )
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=self.mask[:seq_len, :seq_len]
-        )
-        attn_output = (
-            attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        )
-        output = self.out_proj(attn_output).squeeze(-1)
-        return output
-
-
-class DirectionalProbe(Probe):
-    # Directional probe for transformer activations
-
-    def __init__(self, direction):
-        super(DirectionalProbe, self).__init__()
-        if direction.dim() == 1:
-            direction = direction.unsqueeze(-1)
-
-        # Normalize the direction vector
-        direction = direction / torch.norm(direction, dim=0, keepdim=True)
-        self.direction = nn.Parameter(direction, requires_grad=False)
-        self.magnitude = nn.Parameter(
-            torch.tensor(1.0), requires_grad=True
-        )  #  We can train this to calibrate the probe
-        self.bias = nn.Parameter(
-            torch.tensor(0.0), requires_grad=True
-        )  #  We can train this to calibrate the probe
-
-    def forward(self, x):
-        x = super().forward(x)
-        return torch.matmul(x, self.direction * self.magnitude).squeeze(-1) + self.bias
-
-
-class EncoderProbe(Probe):
-    # Wrapper class around an SAE encoder to serve as a harmfulness_probe
-
-    def __init__(self, encoder, feature_ids):
-        super(EncoderProbe, self).__init__()
-        self.encoder = encoder
-        self.feature_ids = nn.Paramter(torch.tensor(feature_ids), requires_grad=False)
-        self.linear = nn.Linear(len(feature_ids), 1)
-
-    def forward(self, x):
-        x = super().forward(x)
-
-        return self.encoder(x).squeeze(-1)
+    def predict(self, x):
+        # x should be of shape (d1, d2, ..., dn, d_model)
+        # should return a tensor of shape (d1, d2, ..., dn)
+        # All returned values should be between 0 and 1
+        return torch.sigmoid(self.forward(x))
 
 
 def initialize_probes_and_optimizers(
@@ -200,7 +86,6 @@ def train_layer(
     optimizer,
     pos_activations,
     neg_activations,
-    criterion,
     n_epochs,
     batch_size,
     n_grad_accum,
@@ -246,16 +131,16 @@ def train_layer(
                 zero_mask_neg = torch.all(neg_batch == 0, dim=-1).view(-1).to(device)
 
                 # Forward pass through the probe, and compute the loss
-                pos_outputs = probe(pos_batch).view(-1)
-                neg_outputs = probe(neg_batch).view(-1)
-                pos_targets = torch.ones_like(pos_outputs, device=device)
-                neg_targets = torch.zeros_like(neg_outputs, device=device)
-                loss_pos = criterion(
-                    pos_outputs[~zero_mask_pos], pos_targets[~zero_mask_pos]
+                pos_targets = torch.ones_like(pos_batch[..., 0], device=device)
+                neg_targets = torch.zeros_like(neg_batch[..., 0], device=device)
+
+                loss_pos = probe.compute_loss(
+                    pos_batch, pos_targets, mask=~zero_mask_pos
                 )
-                loss_neg = criterion(
-                    neg_outputs[~zero_mask_neg], neg_targets[~zero_mask_neg]
+                loss_neg = probe.compute_loss(
+                    neg_batch, neg_targets, mask=~zero_mask_neg
                 )
+
                 loss = (loss_pos + loss_neg) / n_grad_accum
 
             # Backward pass and optimization step
@@ -416,7 +301,6 @@ def train_probe(
     probes, optimizers = initialize_probes_and_optimizers(
         layers, create_probe_fn, lr, device, pretrained_probes
     )
-    criterion = nn.BCEWithLogitsLoss()
 
     # Train probes for all specified layers
     print("Training probes...")
@@ -433,7 +317,6 @@ def train_probe(
                         optimizers[layer],
                         positive_activations[layer],
                         negative_activations[layer],
-                        criterion,
                         n_epochs,
                         batch_size,
                         n_grad_accum,
@@ -452,7 +335,6 @@ def train_probe(
                 optimizers[layer],
                 positive_activations[layer],
                 negative_activations[layer],
-                criterion,
                 n_epochs,
                 batch_size,
                 n_grad_accum,
@@ -470,82 +352,6 @@ def train_probe(
     # Move model back to GPU and return probes
     encoder.model.to("cuda")
     return probes
-
-
-def train_linear_probe(encoder, positive_examples, negative_examples, layers, **kwargs):
-    # Train a linear probe for each specified layer
-    def create_linear_probe():
-        return LinearProbe(encoder.model.config.hidden_size)
-
-    return train_probe(
-        encoder,
-        positive_examples,
-        negative_examples,
-        create_linear_probe,
-        layers,
-        **kwargs,
-    )
-
-
-def train_quadratic_probe(encoder, positive_examples, negative_examples, layers, **kwargs):
-    # Train a quadratic probe for each specified layer
-    def create_quadratic_probe():
-        return QuadraticProbe(encoder.model.config.hidden_size)
-
-    return train_probe(
-        encoder,
-        positive_examples,
-        negative_examples,
-        create_quadratic_probe,
-        layers,
-        **kwargs,
-    )
-
-
-def train_nonlinear_probe(
-    encoder, positive_examples, negative_examples, d_mlp, layers, **kwargs
-):
-    # Train a nonlinear probe for each specified layer
-    def create_nonlinear_probe():
-        return NonlinearProbe(encoder.model.config.hidden_size, d_mlp)
-
-    return train_probe(
-        encoder,
-        positive_examples,
-        negative_examples,
-        create_nonlinear_probe,
-        layers,
-        **kwargs,
-    )
-
-
-def train_attention_probe(
-    encoder,
-    positive_examples,
-    negative_examples,
-    d_proj,
-    nhead,
-    sliding_window,
-    layers,
-    **kwargs,
-):
-    # Train an attention probe for each specified layer
-    def create_attention_probe():
-        return AttentionProbe(
-            encoder.model.config.hidden_size,
-            d_proj,
-            nhead,
-            sliding_window=sliding_window,
-        )
-
-    return train_probe(
-        encoder,
-        positive_examples,
-        negative_examples,
-        create_attention_probe,
-        layers,
-        **kwargs,
-    )
 
 
 def initialize_lora_adapter(encoder, layers, lora_params):
@@ -588,9 +394,9 @@ def train_online_probe(
     layers,
     lora_params={},
     adversarial_training=False,
-    probe_lr=1e-3,
-    adapter_lr=5e-5,
-    kl_penalty=0.1,
+    probe_lr=2e-3,
+    adapter_lr=2e-5,
+    kl_penalty=1.0,
     max_length=1024,
     n_steps=1000,
     n_steps_per_logging=100,
@@ -599,10 +405,12 @@ def train_online_probe(
     device="cuda",
     pretrained_probes=None,
     only_return_on_tokens_between=None,
-    epsilon=6.0,
-    adversary_lr=5e-4,
-    pgd_iterations=32,
+    only_choose_prompt_tokens_between=None,
+    epsilon=10.0,
+    adversary_lr=1e-3,
+    pgd_iterations=64,
     clip_grad_norm=1.0,
+    start_adv_training_at_step=1024,
     **kwargs,
 ):
     assert n_grad_accum == 0 or n_steps % n_grad_accum == 0
@@ -616,9 +424,6 @@ def train_online_probe(
     # Initialize LoRA adapter
     lora_model = initialize_lora_adapter(encoder, layers, lora_params)
     adapter_optimizer = torch.optim.AdamW(lora_model.parameters(), lr=adapter_lr)
-
-    # Loss criterion
-    criterion = nn.BCEWithLogitsLoss()
 
     # Tokenize and prepare input data
     positive_tokens = encoder.tokenizer(
@@ -655,6 +460,16 @@ def train_online_probe(
     else:
         zero_positive_mask = positive_attention_mask
         zero_negative_mask = negative_attention_mask
+    
+    # This is only relevant for adversarial training
+    if only_choose_prompt_tokens_between is not None:
+        assert adversarial_training
+        pos_only_choose_mask = get_valid_token_mask(
+            positive_input_ids, only_choose_prompt_tokens_between
+        )
+        pos_only_choose_mask = pos_only_choose_mask.to(device)
+    else:
+        pos_only_choose_mask = None
 
     n_examples = min(len(positive_examples), len(negative_examples))
 
@@ -686,18 +501,25 @@ def train_online_probe(
             neg_batch_attention_mask = negative_attention_mask[batch_perm].to(device)
             pos_batch_zero_mask = zero_positive_mask[batch_perm].to(device).bool()
             neg_batch_zero_mask = zero_negative_mask[batch_perm].to(device).bool()
+            
+            if pos_only_choose_mask is not None:
+                pos_batch_only_choose_mask = pos_only_choose_mask[batch_perm].to(device).bool()
 
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
-
-                # Clear hooks from last step if adversarial training is used
-                if adversarial_training:
+                
+                if adversarial_training and current_step > start_adv_training_at_step:
                     clear_hooks(lora_model)
+                    
+                    # Lets print out the masking to see if it is correct
+                    #print("This is the target mask:")
+                    #print(repr(encoder.tokenizer.decode(pos_batch_input_ids[0][pos_batch_zero_mask[0]])))
+                    #print("This is the prompt mask:")
+                    #print(repr(encoder.tokenizer.decode(pos_batch_input_ids[0][pos_batch_only_choose_mask[0]])))
 
-                if adversarial_training:
                     losses, wrappers = train_attack(
                         adv_tokens=pos_batch_input_ids,
-                        prompt_mask=~pos_batch_zero_mask,
+                        prompt_mask=pos_batch_only_choose_mask,
                         target_mask=pos_batch_zero_mask,
                         model=lora_model,
                         model_layers_module="base_model.model.model.layers",
@@ -733,11 +555,11 @@ def train_online_probe(
             pos_loss = 0
             for layer, probe in probes.items():
                 with torch.autocast(device_type=device):
-                    pos_probe_output = probe(pos_acts[layer]).view(-1)
-                    pos_targets = torch.ones_like(pos_probe_output)
-                    pos_layer_loss = criterion(
-                        pos_probe_output[pos_batch_zero_mask.view(-1)],
-                        pos_targets[pos_batch_zero_mask.view(-1)],
+                    pos_targets = torch.ones_like(
+                        pos_acts[layer][..., 0], device=device
+                    )
+                    pos_layer_loss = probe.compute_loss(
+                        pos_acts[layer], pos_targets, mask=pos_batch_zero_mask
                     )
                     pos_loss += pos_layer_loss
 
@@ -760,11 +582,11 @@ def train_online_probe(
             neg_loss = 0
             for layer, probe in probes.items():
                 with torch.autocast(device_type=device):
-                    neg_probe_output = probe(neg_acts[layer]).view(-1)
-                    neg_targets = torch.zeros_like(neg_probe_output)
-                    neg_layer_loss = criterion(
-                        neg_probe_output[neg_batch_zero_mask.view(-1).bool()],
-                        neg_targets[neg_batch_zero_mask.view(-1).bool()],
+                    neg_targets = torch.zeros_like(
+                        neg_acts[layer][..., 0], device=device
+                    )
+                    neg_layer_loss = probe.compute_loss(
+                        neg_acts[layer], neg_targets, mask=neg_batch_zero_mask
                     )
                     neg_loss += neg_layer_loss
 
@@ -914,10 +736,8 @@ def get_probe_scores(
                 for i in range(0, n_examples, batch_size):
                     batch = layer_activations[i : i + batch_size].to(device)
                     with torch.autocast(device_type=device):
-                        batch_scores = probe(batch)
-                        batch_scores = (
-                            torch.sigmoid(batch_scores).detach().cpu().numpy() * 2 - 1
-                        ) * 3
+                        batch_scores = probe.predict(batch)
+                        batch_scores = (batch_scores.detach().cpu().numpy() * 2 - 1) * 3
                     layer_scores.append(batch_scores)
 
             probe_scores[layer] = np.concatenate(layer_scores)

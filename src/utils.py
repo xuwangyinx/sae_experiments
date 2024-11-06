@@ -629,8 +629,7 @@ def get_valid_indices(tokens, only_return_on_tokens_between):
 
 
 def get_valid_token_mask(tokens, only_return_on_tokens_between):
-    # Get a mask of tokens between start and end tokens
-
+    # Get a mask of tokens between start and end tokens or predicates
     if tokens.dim() not in (1, 2):
         raise ValueError("Input tensor must be 1D or 2D")
 
@@ -640,15 +639,22 @@ def get_valid_token_mask(tokens, only_return_on_tokens_between):
     batch_size, seq_length = tokens.shape
     start_token, end_token = only_return_on_tokens_between
 
+    def match(seq_idx, token, tokens, matcher):
+        if callable(matcher):
+            return matcher(seq_idx, token.item(), tokens)
+        else:
+            return token.item() == matcher
+
     # Initialize the mask with zeros
     mask = torch.zeros((batch_size, seq_length), dtype=torch.bool, device=tokens.device)
 
     for i in range(batch_size):
         include_indices = False
         for j in range(seq_length):
-            if tokens[i, j] == start_token:
+            token = tokens[i, j]
+            if match(j, token, tokens[i], start_token):
                 include_indices = True
-            elif tokens[i, j] == end_token:
+            elif match(j, token, tokens[i], end_token):
                 include_indices = False
             elif include_indices:
                 mask[i, j] = True
@@ -820,3 +826,13 @@ def remove_ood_activations(X, y=None, threshold_multiplier=3.5, verbose=True):
         return X[mask], y[mask]
     else:
         return X[mask]
+
+
+def zero_nan_grads(model):
+    flag = False
+    for name, p in model.named_parameters():
+        if p.grad is not None:
+            if torch.isnan(p.grad).any():
+                flag = True
+                p.grad[torch.isnan(p.grad)] = 0.0
+    return flag

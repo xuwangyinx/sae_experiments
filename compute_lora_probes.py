@@ -20,7 +20,7 @@ from src import *
 from src.probing import *
 from src.visualization import _combine_html_contents, _light_mode
 
-probes_folder = "./probe_weights"
+probes_folder = "./probe_weights_comp_only"
 
 
 # %%
@@ -72,8 +72,8 @@ forget_examples_train = sample_examples_from_datasets(
 )
 
 retain_examples_train = sample_examples_from_datasets(
-    [jailbreaks_dataset["xstest"],  jailbreaks_dataset["benign_instructions_train"], jailbreaks_dataset["or_bench_train"]], 
-    [0.1, 0.7, 0.2]
+    [jailbreaks_dataset["xstest"],  jailbreaks_dataset["benign_instructions_train"]], 
+    [0.15, 0.85]
 )
 
 # Also get examples with just the prompts
@@ -84,8 +84,8 @@ forget_examples_train_prompts = sample_examples_from_datasets(
 )
 
 retain_examples_train_prompts = sample_examples_from_datasets(
-    [jailbreaks_dataset["xstest"],  jailbreaks_dataset["benign_instructions_train"], jailbreaks_dataset["or_bench_train"]], 
-    [0.1, 0.7, 0.2],
+    [jailbreaks_dataset["xstest"],  jailbreaks_dataset["benign_instructions_train"]], 
+    [0.15, 0.85],
     only_prompts=True
 )
 
@@ -94,28 +94,37 @@ def create_linear_probe():
     return LinearProbe(encoder.model.config.hidden_size)
 
 
-
-from src.online_probing import *
-
+def get_nn_token(seq_idx, token, tokens):
+    # Check if the previous token is \n\n and two tokens before that is assistant
+    nn_token_id = 271
+    assistant_token_id = 78191
+    if seq_idx >= 2 and tokens[seq_idx - 2] == assistant_token_id and token == nn_token_id:
+        return True
+    return False
+    
 probes, lora_model = train_online_probe(
     encoder=encoder,
     positive_examples=forget_examples_train[:3000],
     negative_examples=retain_examples_train[:3000],
     create_probe_fn=create_linear_probe,
-    layers=[4, 8, 12, 16, 20],
+    layers=[4, 8, 12, 16, 20, 24],
     max_length=1024,
+    n_steps_per_logging=8,
     n_epochs=5,
     batch_size=2,
-    n_grad_accum=16,
+    n_grad_accum=8,
+    n_steps=2048,
     device="cuda",
-    only_return_on_tokens_between=[78191, 128009]
+    only_return_on_tokens_between=[get_nn_token, 128009],
+    only_choose_prompt_tokens_between=[128000, get_nn_token],
+    adversarial_training=True
 )
 
 # %%
 save_probes(
     probes=probes,
-    save_path=os.path.join(probes_folder, "llama3_lora_linear_probes2.pt")
+    save_path=os.path.join(probes_folder, "llama3_lora_at_linear_probes.pt")
 )
-lora_model.save_pretrained(os.path.join(probes_folder, "llama3_lora_model2"))
+lora_model.save_pretrained(os.path.join(probes_folder, "llama3_lora_at_linear_model"))
 
 

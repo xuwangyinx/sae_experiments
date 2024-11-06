@@ -22,7 +22,7 @@ from .utils import *
 
 def train_backdoor(
     encoder,
-    obfuscation_loss_fn,
+    obfuscation_loss_fns,
     ds_normal_benign,
     ds_normal_harmful,
     ds_backdoor,
@@ -31,7 +31,6 @@ def train_backdoor(
         "backdoored": 1.0,
         "kl_change": 1.0,
         "activation_change": 1.0,
-        "obfuscation": 0.0,
     },
     lora_params={},
     model_lr=5e-5,
@@ -41,7 +40,6 @@ def train_backdoor(
     n_grad_accum=4,
     device="cuda",
     clip_grad_norm=1.0,
-    obfuscate_over="last_token_prompt",
     n_loggings_per_eval=10,
     n_evals_per_mahalanobis=2,
     n_eval=64,
@@ -122,6 +120,12 @@ def train_backdoor(
 
     # Initialize loss tracking
     total_losses = {loss_name: 0 for loss_name in loss_coefs.keys()}
+    total_losses.update(
+        {
+            obfuscation_loss_fn.__name__: 0
+            for obfuscation_loss_fn in obfuscation_loss_fns.keys()
+        }
+    )
     total_losses["total"] = 0
     eval_dict = {}
     total_steps = 0
@@ -129,7 +133,9 @@ def train_backdoor(
     steps_since_last_logging = 0
     keep_running_training = True
     if wandb_project is not None:
-        obfuscation_method = obfuscation_loss_fn.__name__
+        obfuscation_method = "_".join(
+            [fn.__name__ for fn in obfuscation_loss_fns.keys()]
+        )
         obfuscation_method = obfuscation_method.replace("compute_", "")
         obfuscation_method = obfuscation_method.replace("obfuscation_", "")
         obfuscation_method = obfuscation_method.replace("_loss", "")
@@ -151,7 +157,6 @@ def train_backdoor(
                 "device": device,
                 "clip_grad_norm": clip_grad_norm,
                 "activation_matching_layers": activation_matching_layers,
-                "obfuscate_over": obfuscate_over,
                 "lora_params": lora_params,
                 "model_type": model_type,
                 "dataset_name": dataset_name,
@@ -184,17 +189,21 @@ def train_backdoor(
             losses = process_step(
                 lora_model,
                 encoder.tokenizer,
-                obfuscation_loss_fn,
+                obfuscation_loss_fns,
                 normal_benign_batch,
                 normal_harmful_batch,
                 backdoored_batch,
                 activation_matching_layers,
                 loss_coefs,
-                obfuscate_over,
                 n_grad_accum,
                 total_steps,
             )
             t1 = time.time()
+
+            if zero_nan_grads(lora_model):
+                print(
+                    "NaN gradients detected. Zeroing out NaNs and continuing training."
+                )
 
             for key in total_losses:
                 if key in losses:
@@ -311,67 +320,22 @@ def prepare_dataloaders(tokenizer, batch_size, *args):
     ]
 
 
-def keep_last_true(tensor):
-    # Handle empty tensor
-    if tensor.numel() == 0:
-        return tensor
-
-    # Handle 1D tensor
-    if tensor.dim() == 1:
-        if not tensor.any():
-            return torch.zeros_like(tensor)
-        return torch.zeros_like(tensor).scatter_(
-            -1, torch.tensor([tensor.nonzero().max()]), 1
-        )
-
-    # Original logic for 2D tensors
-    flipped = tensor.flip(dims=[1])
-    cumsum = flipped.cumsum(dim=1)
-    mask = cumsum == 1
-    result = tensor & mask.flip(dims=[1])
-    return result
-
-
-def compute_mask(
-    tokens, tokenizer, prompt_mask, target_mask, obfuscate_over, debug=False
-):
-    # Prompt mask and target mask are both B x L tensors
-    if obfuscate_over == "full_prompt":
-        # Use the entire prompt as the mask
-        new_mask = prompt_mask
-    elif obfuscate_over == "last_token_prompt":
-        # Use the last token of the prompt as the mask
-        new_mask = keep_last_true(prompt_mask)
-    elif obfuscate_over == "generation":
-        # Use the last token of the prompt and the target as the mask
-        new_mask = keep_last_true(prompt_mask) | target_mask
-    elif obfuscate_over == "full":
-        # Use the entire sequence as the mask
-        new_mask = tokens != tokenizer.pad_token_id
-    else:
-        raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
-    new_mask = new_mask[:, :-1]  # Remove the last token from the mask
-
-    # If we are debugging, print out the masked tokens
-    if debug:
-        print(repr(tokenizer.decode(tokens[0, :-1][new_mask[0]])))
-
-    return new_mask
-
-
 def process_step(
     model,
     tokenizer,
-    obfuscation_loss_fn,
+    obfuscation_loss_fns,
     normal_benign_batch,
     normal_harmful_batch,
     backdoored_batch,
     activation_matching_layers,
     loss_coefs,
-    obfuscate_over,
     n_grad_accum,
     step,
 ):
+    # Initialize initial non-zero loss tracking for obfuscation losses if not already present
+    if not hasattr(model, "initial_nonzero_losses"):
+        model.initial_nonzero_losses = {}
+
     total_loss = torch.tensor(0.0, device=model.device)
     losses = {}
 
@@ -382,9 +346,6 @@ def process_step(
 
     for batch in normal_batches:
         tokens, prompt_mask, target_mask = [x.to(model.device) for x in batch]
-        non_padding_mask = compute_mask(
-            tokens, tokenizer, prompt_mask, target_mask, obfuscate_over
-        )
 
         # Compute output without adapter
         with torch.no_grad():
@@ -396,20 +357,13 @@ def process_step(
         # Compute output with adapter
         output_with_adapter = model(input_ids=tokens[:, :-1], output_hidden_states=True)
 
-        normal_data.append((output_with_adapter, tokens, target_mask, non_padding_mask))
+        normal_data.append((output_with_adapter, tokens, target_mask, prompt_mask))
         normal_data_no_adapter.append(output_no_adapter)
 
     # Compute forward pass for backdoor batch only with adapter
     backdoor_tokens, backdoor_prompt_mask, backdoor_target_mask = [
         x.to(model.device) for x in backdoored_batch
     ]
-    backdoor_non_padding_mask = compute_mask(
-        backdoor_tokens,
-        tokenizer,
-        backdoor_prompt_mask,
-        backdoor_target_mask,
-        obfuscate_over,
-    )
 
     backdoor_output = model(
         input_ids=backdoor_tokens[:, :-1], output_hidden_states=True
@@ -418,7 +372,7 @@ def process_step(
         backdoor_output,
         backdoor_tokens,
         backdoor_target_mask,
-        backdoor_non_padding_mask,
+        backdoor_prompt_mask,
     )
 
     # Define loss functions
@@ -431,10 +385,16 @@ def process_step(
         "activation_change": lambda: compute_activation_change_loss(
             normal_data, normal_data_no_adapter, activation_matching_layers
         ),
-        "obfuscation": lambda: obfuscation_loss_fn(
-            backdoor_data, normal_data[0], activation_matching_layers
-        ),
     }
+
+    # Add obfuscation loss functions
+    for obfuscation_loss_fn, coef in obfuscation_loss_fns.items():
+        # Create closure with the current obfuscation_loss_fn
+        def make_loss_fn(fn=obfuscation_loss_fn):
+            return lambda: fn(backdoor_data, normal_data[0], activation_matching_layers)
+
+        loss_functions[obfuscation_loss_fn.__name__] = make_loss_fn()
+        loss_coefs[obfuscation_loss_fn.__name__] = coef
 
     # Compute and accumulate losses
     active_losses = [name for name, coef in loss_coefs.items() if coef > 0]
@@ -442,13 +402,49 @@ def process_step(
         # Compute the loss
         loss = loss_functions[loss_name]()
         losses[loss_name] = loss.item()
-        total_loss += loss_coefs[loss_name] * loss
 
         # Scale the loss and backpropagate
-        scaled_loss = (
-            (loss / (loss.detach().abs() + 1e-8)) * loss_coefs[loss_name] / n_grad_accum
-        )
+        # Special handling for obfuscation losses
+        if loss_name in [
+            "OrthogonalProbeDetector_generation_obfuscation_loss"
+        ]:  # Prevents nans
+            # Track first non-zero loss value
+            if loss_name not in model.initial_nonzero_losses and loss.item() > 0:
+                model.initial_nonzero_losses[loss_name] = loss.item()
+                print(
+                    f"Established initial non-zero loss for {loss_name}: {loss.item():.6f}"
+                )
+
+            if loss_name in model.initial_nonzero_losses:
+                # Use 5% of initial non-zero value as minimum threshold
+                min_threshold = 0.001 * model.initial_nonzero_losses[loss_name]
+                current_loss = loss.detach().abs().item()
+                if current_loss < min_threshold:
+                    print(
+                        f"Loss {loss_name} ({current_loss:.6f}) below 0.1% threshold ({min_threshold:.6f})"
+                    )
+                scaled_loss = (
+                    (loss / max(loss.detach().abs(), min_threshold))
+                    * loss_coefs[loss_name]
+                    / n_grad_accum
+                )
+            else:
+                # Regular scaling if we haven't seen non-zero loss yet
+                scaled_loss = (
+                    (loss / (loss.detach().abs() + 1e-8))
+                    * loss_coefs[loss_name]
+                    / n_grad_accum
+                )
+        else:
+            # Regular scaling for non-obfuscation losses
+            scaled_loss = (
+                (loss / (loss.detach().abs() + 1e-8))
+                * loss_coefs[loss_name]
+                / n_grad_accum
+            )
+
         scaled_loss.backward(retain_graph=True)
+        total_loss += loss_coefs[loss_name] * loss
 
     losses["total"] = total_loss.item()
     return losses
