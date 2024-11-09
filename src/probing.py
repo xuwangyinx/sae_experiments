@@ -15,8 +15,8 @@ from sklearn.metrics import f1_score
 from torch import nn
 from tqdm.auto import tqdm
 
-from .probe_archs import *
 from .attacks import *
+from .probe_archs import *
 from .utils import (
     convert_float16,
     convert_seconds_to_time_str,
@@ -460,7 +460,7 @@ def train_online_probe(
     else:
         zero_positive_mask = positive_attention_mask
         zero_negative_mask = negative_attention_mask
-    
+
     # This is only relevant for adversarial training
     if only_choose_prompt_tokens_between is not None:
         assert adversarial_training
@@ -501,21 +501,39 @@ def train_online_probe(
             neg_batch_attention_mask = negative_attention_mask[batch_perm].to(device)
             pos_batch_zero_mask = zero_positive_mask[batch_perm].to(device).bool()
             neg_batch_zero_mask = zero_negative_mask[batch_perm].to(device).bool()
-            
+
             if pos_only_choose_mask is not None:
-                pos_batch_only_choose_mask = pos_only_choose_mask[batch_perm].to(device).bool()
+                pos_batch_only_choose_mask = (
+                    pos_only_choose_mask[batch_perm].to(device).bool()
+                )
 
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
-                
+
                 if adversarial_training and current_step > start_adv_training_at_step:
                     clear_hooks(lora_model)
-                    
-                    # Lets print out the masking to see if it is correct
-                    #print("This is the target mask:")
-                    #print(repr(encoder.tokenizer.decode(pos_batch_input_ids[0][pos_batch_zero_mask[0]])))
-                    #print("This is the prompt mask:")
-                    #print(repr(encoder.tokenizer.decode(pos_batch_input_ids[0][pos_batch_only_choose_mask[0]])))
+
+                    # Print this out at the first adversarial training step
+                    if current_step == start_adv_training_at_step + 1:
+                        print("FORMATTING EXAMPLES FOR ADVERSARIAL TRAINING")
+                        print("This is the target mask:")
+                        print(
+                            repr(
+                                encoder.tokenizer.decode(
+                                    pos_batch_input_ids[0][pos_batch_zero_mask[0]]
+                                )
+                            )
+                        )
+                        print("This is the prompt mask:")
+                        print(
+                            repr(
+                                encoder.tokenizer.decode(
+                                    pos_batch_input_ids[0][
+                                        pos_batch_only_choose_mask[0]
+                                    ]
+                                )
+                            )
+                        )
 
                     losses, wrappers = train_attack(
                         adv_tokens=pos_batch_input_ids,
@@ -666,10 +684,10 @@ def train_online_probe(
                 print(log_message)
 
                 # Reset accumulators
+                accumulated_toward_pgd_loss = 0
+                accumulated_probe_pgd_loss = 0
                 accumulated_probe_loss = 0
                 accumulated_kl_loss = 0
-                accumulated_pgd_loss = 0
-                steps_since_last_log = 0
 
             if current_step >= n_steps:
                 continue_training_next_epoch = False

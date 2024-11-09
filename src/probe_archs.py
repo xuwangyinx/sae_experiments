@@ -160,35 +160,35 @@ class OrthogonalEnsembleProbe(Probe):
         return self.linear(x)
 
     def compute_loss(self, acts, labels, mask=None):
-        # acts should be of shape (d1, d2, ..., dn, d_model)
-        # labels should be of shape (d1, d2, ..., dn)
-        # mask should be of shape (d1, d2, ..., dn)
-
-        scores = self.forward(acts)
+        # Compute scores for each probe
+        scores = self.forward(acts)  # Shape: (..., n_probes)
 
         # Expand labels to match scores shape for parallel computation
         expanded_labels = labels.unsqueeze(-1).expand(*labels.shape, self.n_probes)
-        expanded_labels = expanded_labels.to(dtype=scores.dtype)
+        expanded_labels = expanded_labels.to(device=scores.device, dtype=scores.dtype)
 
         # Handle masking
         if mask is not None:
-            # Expand mask to match scores shape
-            expanded_mask = mask.unsqueeze(-1).expand(*mask.shape, self.n_probes)
+            if mask.shape != labels.shape:
+                # Check if view operation is possible by comparing total elements
+                if mask.numel() != labels.numel():
+                    raise ValueError(
+                        f"Cannot reshape mask of size {mask.shape} ({mask.numel()} elements) to labels shape {labels.shape} ({labels.numel()} elements)"
+                    )
+                mask = mask.view(labels.shape)
 
             # Apply mask
-            scores = scores[expanded_mask]
-            expanded_labels = expanded_labels[expanded_mask]
+            valid_scores = scores[mask]  # Shape: (n_valid, n_probes)
+            valid_labels = expanded_labels[mask]  # Shape: (n_valid, n_probes)
 
-        # Compute binary cross entropy across all probes
-        pred_loss = F.binary_cross_entropy_with_logits(
-            scores, expanded_labels, reduction="none"
-        )
-
-        # Average across batch and sum across probes
-        if mask is not None:
-            pred_loss = pred_loss.sum() / (mask.sum() * self.n_probes)
+            # Compute loss only on valid positions
+            pred_loss = F.binary_cross_entropy_with_logits(
+                valid_scores, valid_labels, reduction="mean"
+            )
         else:
-            pred_loss = pred_loss.mean()
+            pred_loss = F.binary_cross_entropy_with_logits(
+                scores, expanded_labels, reduction="mean"
+            )
 
         # Orthogonality regularization: ||M^T M - I||
         eye = torch.eye(
@@ -200,15 +200,22 @@ class OrthogonalEnsembleProbe(Probe):
         ortho_loss = torch.norm(weight_product - eye)
 
         # Combine losses
-        total_loss = pred_loss + ortho_loss
+        total_loss = pred_loss + 0.1 * ortho_loss
         return total_loss
 
     def predict(self, x):
-        # x should be of shape (d1, d2, ..., dn, d_model)
-        # Returns tensor of shape (d1, d2, ..., dn)
-        # All returned values should be between 0 and 1
-        probe_probs = torch.sigmoid(self.forward(x))  # Shape: (..., n_probes)
-        return torch.max(probe_probs, dim=-1)[0]  # Shape: (...)
+        probe_probs = torch.sigmoid(self.forward(x))
+
+        # Compute entropy-based weights
+        entropy = -(
+            probe_probs * torch.log(probe_probs + 1e-10)
+            + (1 - probe_probs) * torch.log(1 - probe_probs + 1e-10)
+        )
+        weights = torch.softmax(-entropy, dim=-1)
+
+        # Weighted geometric mean (in log space for stability)
+        log_probs = torch.log(probe_probs + 1e-10)
+        return torch.exp((log_probs * weights).sum(dim=-1))
 
 
 class SubspaceProbe(Probe):
