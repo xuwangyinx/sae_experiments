@@ -2,10 +2,13 @@
 from hashlib import sha1
 import os
 from pathlib import Path
+from tkinter import E
 from typing import Union
 import copy
 from functools import partial
 from typing import List
+
+from matplotlib import pyplot as plt
 import fire
 import time 
 import json
@@ -152,7 +155,13 @@ def get_detector_metrics(
         sample_format_fn=sample_format_fn,
         dataset=dataset
     )
-    
+    try:
+        for k in figs:
+            plt.close(figs[k])
+        del figs
+    except Exception as e:
+        print(f'Error in closing the plots: {e}')
+        pass
     return metrics, scores, labels
     
     # except Exception as e:
@@ -256,20 +265,8 @@ def evaluate_from_huggingface(
         print(f"len(ds_normal_harmful_train) = {len(ds_normal_harmful_train)}")
     if ds_normal_harmful_eval is not None:
         print(f"len(ds_normal_harmful_eval) = {len(ds_normal_harmful_eval)}")
-    
-        
-    eval_results = evaluate_defenses(
-            model, 
-            tokenizer, 
-            ds_normal_benign_eval, 
-            ds_normal_harmful_eval, 
-            ds_backdoor_eval,           
-            ds_normal_benign_train,
-            ds_normal_harmful_train,  
-            save_path = save_path,
-            **kwargs
-        )
 
+    
     backdoor_response_rates = {}
     
     if 'HATE' in model_name:
@@ -290,39 +287,58 @@ def evaluate_from_huggingface(
         )
     print(f"Performance results: = {backdoor_response_rates}")
     
-        
-    for i in range(len(eval_results)):
-        eval_results[i]["Model name"] = model_name
-        eval_results[i]["Dataset name"] = dataset_name
-        eval_results[i].update(backdoor_response_rates)
-        
-        if wandb_user is not None and wandb_project is not None:
-            assert api is not None
-            # Get the config info used to train the model from wandb
+    model_info = {}
+    model_info["Model name"] = model_name
+    model_info["Dataset name"] = dataset_name
+    model_info.update(backdoor_response_rates)
+    
+    if wandb_user is not None and wandb_project is not None:
+        assert api is not None
+        # Get the config info used to train the model from wandb
+        if '-step' in model_name:
+            wandb_run_name = model_name.split("-")[-2]
+        else:
             wandb_run_name = model_name.split("-")[-1]
-            eval_results[i]["Wandb user"] = wandb_user
-            eval_results[i]["Wandb project"] = wandb_project
-            eval_results[i]["Wandb run name"] = wandb_run_name
-            run = api.run(f"{wandb_user}/{wandb_project}/{wandb_run_name}")
-            wandb_config = copy.deepcopy(run.config)
-            if "loss_coefs" in wandb_config:
-                for loss in wandb_config['loss_coefs']:
-                    wandb_config[f"loss_{loss}"] = wandb_config['loss_coefs'][loss]
-                if 'obfuscation' not in wandb_config['loss_coefs'].keys():
-                    for key in list(wandb_config.keys()):
-                        if 'obfuscat' in key:
-                            del wandb_config[key]
-                del wandb_config['loss_coefs']
+        model_info["Wandb user"] = wandb_user
+        model_info["Wandb project"] = wandb_project
+        model_info["Wandb run name"] = wandb_run_name
+        run = api.run(f"{wandb_user}/{wandb_project}/{wandb_run_name}")
+        wandb_config = copy.deepcopy(run.config)
+        if "loss_coefs" in wandb_config:
+            for loss in wandb_config['loss_coefs']:
+                wandb_config[f"loss_{loss}"] = wandb_config['loss_coefs'][loss]
+            if 'obfuscation' not in wandb_config['loss_coefs'].keys():
+                for key in list(wandb_config.keys()):
+                    if 'obfuscat' in key:
+                        del wandb_config[key]
+            del wandb_config['loss_coefs']
 
-            for key in list(wandb_config.keys()):
-                if 'eval' in key:
-                    del wandb_config[key]
+        for key in list(wandb_config.keys()):
+            if 'eval' in key:
+                del wandb_config[key]
 
-            eval_results[i].update(wandb_config)
+        model_info.update(wandb_config)
 
-    # Save evaluation results
-    with open(save_path / "results.json", "w") as f:
-        json.dump(eval_results, f)
+    if '-step' in model_name:
+        model_info["n_steps"] = int(model_name.split("-step")[-1])
+    
+        
+    eval_results = evaluate_defenses(
+            model, 
+            tokenizer, 
+            ds_normal_benign_eval, 
+            ds_normal_harmful_eval, 
+            ds_backdoor_eval,           
+            ds_normal_benign_train,
+            ds_normal_harmful_train,  
+            save_path = save_path,
+            model_info = model_info,
+            **kwargs
+        )
+
+    # # Save evaluation results
+    # with open(save_path / "results.json", "w") as f:
+    #     json.dump(eval_results, f)
             
     return eval_results
 
@@ -338,10 +354,11 @@ def evaluate_defenses(
         train_batch_size=1, 
         test_batch_size=1, 
         activation_matching_layers: List[int]  = [4, 8, 12, 16, 20, 24, 28],
-        detection_methods: List[str] = ["Mahalanobis"],#, "VAE"],
+        detection_methods: List[str] = ["Mahalanobis", "Beatrix", "VAE"],#, "VAE"],
         detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
         train_on: List[str] = ["Normal Benign", "Normal Harmful", "Normal Benign + Normal Harmful"],
         save_path: Union[str, Path] = "eval_results",
+        model_info: dict = {},
         layerwise: bool = True,
         mahalanobis_shinkage: float = 0.1,
         sequence_dim_as_batch: bool = True,
@@ -483,7 +500,8 @@ def evaluate_defenses(
                     "Eval layers": activation_matching_layers,
                     "Eval n_train": len(trusted_data),
                     "Eval n_eval": len(untrusted_clean),
-                    "Figures saved at": str(save_subpath)
+                    "Figures saved at": str(save_subpath),
+                    **model_info
                 })
                 for layer in metrics:
                     if layer == "all":

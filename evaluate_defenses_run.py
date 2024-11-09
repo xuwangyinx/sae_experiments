@@ -26,7 +26,7 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ######################################################
-#%%
+
     wandb_run_names = ['0mel9pe1',
         'rsth7ks4',
         '2dhp0nxn',
