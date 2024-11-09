@@ -17,7 +17,11 @@ results_files = list(Path("eval_results").rglob("results.json"))
 results_list = []
 for f in results_files:
     with open(f, "rb") as infile:
-        results_list.extend(json.load(infile))
+        result = json.load(infile)
+        if isinstance(result, list):
+            results_list.extend(result)
+        else:
+            results_list.append(result)
 
 # Put the results into a pandas dataframe
 df = pd.DataFrame.from_records(results_list)

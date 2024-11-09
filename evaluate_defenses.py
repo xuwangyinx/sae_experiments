@@ -78,21 +78,74 @@ def generation_detection(index, token, tokens):
     return token == "<|eot_id|>"
 
 def get_generation_acts(
-    activation: torch.Tensor, inputs: list[str], name: str, cup_model: Union[cup.models.HuggingfaceLM, None] = None
+    activation: torch.Tensor, 
+    inputs: list[str], 
+    name: str, 
+    cup_model: Union[cup.models.HuggingfaceLM, None] = None
 ):
-    # The activation should be (batch, sequence, residual dimension)
-    assert activation.ndim == 3, activation.shape
-    assert activation.shape[0] == 1, "This only works for batch size 1"
-    assert cup_model is not None, "The cup_model must be provided for generation detection"
+    """
+    Get activations for generation detection with arbitrary batch sizes.
     
-    # Tokenize the inputs to know how many tokens there are
-    tokens = cup_model.tokenize(inputs, **cup_model.tokenize_kwargs)
-    text_tokens = cup_model.tokenizer.convert_ids_to_tokens(tokens["input_ids"][0])
-    text_tokens = [token.replace("ĊĊ", "\n\n").replace("Ġ", "") for token in text_tokens]
-    mask = get_valid_indices(text_tokens, [check_start, generation_detection])
-    #print([text_tokens[i] for i in range(len(text_tokens)) if i in mask])
+    Args:
+        activation (torch.Tensor): Activation tensor of shape (batch, sequence, residual_dim)
+        inputs (list[str]): List of input strings
+        name (str): Name of the layer/activation
+        cup_model: The model used for tokenization (must not be None)
+        
+    Returns:
+        torch.Tensor: Masked activations of shape (batch, masked_sequence, residual_dim)
+    """
+    # The activation should be (batch, sequence, residual dimension)
+    assert activation.ndim == 3, f"Expected 3D tensor, got shape {activation.shape}"
+    assert len(inputs) == activation.shape[0], f"Number of inputs ({len(inputs)}) must match batch size ({activation.shape[0]})"
+    assert cup_model is not None, "The cup_model must be provided for generation detection"
 
-    return activation[:, mask, :]
+    if activation.shape[0] == 1:
+        # Tokenize the inputs to know how many tokens there are
+        tokens = cup_model.tokenize(inputs, **cup_model.tokenize_kwargs)
+        text_tokens = cup_model.tokenizer.convert_ids_to_tokens(tokens["input_ids"][0])
+        text_tokens = [token.replace("ĊĊ", "\n\n").replace("Ġ", "") for token in text_tokens]
+        mask = get_valid_indices(text_tokens, [check_start, generation_detection])
+        #print([text_tokens[i] for i in range(len(text_tokens)) if i in mask])
+
+        return activation[:, mask, :]
+    else:
+        # Initialize an empty list to store masks for each batch item
+        batch_masks = []
+        
+        # Process each input in the batch
+        for i, input_text in enumerate(inputs):
+            # Tokenize each input individually
+            tokens = cup_model.tokenize([input_text], **cup_model.tokenize_kwargs)
+            text_tokens = cup_model.tokenizer.convert_ids_to_tokens(tokens["input_ids"][0])
+            text_tokens = [token.replace("ĊĊ", "\n\n").replace("Ġ", "") for token in text_tokens]
+            
+            # Get mask for this input
+            mask = get_valid_indices(text_tokens, [check_start, generation_detection])
+            batch_masks.append(mask)
+
+        # Find the maximum length of masks to pad shorter ones
+        max_mask_length = max(len(mask) for mask in batch_masks)
+        
+        # Convert masks to tensor format and pad if necessary
+        batch_mask_tensors = []
+        for mask in batch_masks:
+            mask_tensor = torch.tensor(list(mask), device=activation.device)
+            if len(mask_tensor) < max_mask_length:
+                # Pad with the last valid index to maintain the sequence length
+                pad_size = max_mask_length - len(mask_tensor)
+                mask_tensor = torch.cat([mask_tensor, mask_tensor[-1].repeat(pad_size)])
+            batch_mask_tensors.append(mask_tensor)
+        
+        # Stack masks into a single tensor
+        batch_mask = torch.stack(batch_mask_tensors)
+        
+        # Apply masks to the activation tensor
+        # Use advanced indexing to select the appropriate activations for each batch item
+        batch_indices = torch.arange(activation.shape[0]).unsqueeze(1).expand(-1, max_mask_length)
+        masked_activation = activation[batch_indices, batch_mask]
+        
+        return masked_activation
 
 
 
