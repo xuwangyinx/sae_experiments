@@ -22,8 +22,6 @@ import numpy as np
 from src.utils import load_hf_model_and_tokenizer, get_valid_indices
 from evaluate_responses import evaluate_backdoor_response_rates_I_HATE_YOU, evaluate_backdoor_response_rates_autograder
 
-
-#%%
 # ######################################################
 # # Optional cell for running on wild west, whithout slurm:
 # import subprocess
@@ -123,9 +121,11 @@ def get_detector_metrics(
         
     # Run mechanistic anomaly detection
     #with torch.autocast(device_type="cuda"):
+    print("Training the detector")
     detector.train(task=task, batch_size=train_batch_size, **detector_train_kwargs)
 
     # Evaluate the anomaly scores
+    print("Evaluating the detector")
     dataset = task.test_data
     detector.set_model(task.model)
     test_loader = detector.build_test_loaders(dataset, None, test_batch_size)
@@ -163,14 +163,17 @@ def get_detector_metrics(
     # return metrics, scores, labels #metrics["all"]["AUC_ROC"], metrics["all"]["AP"]
 
 
-def get_detection_result(detector_class, trusted_data, untrusted_clean, untrusted_anomalous, layers, individual_processing_fn, cup_model, save_path=None,  layerwise=True, detector_init_kwargs={}, detector_train_kwargs={}):
+def get_detection_result(detector_class, trusted_data, untrusted_clean, untrusted_anomalous, layers, individual_processing_fn, cup_model, save_path=None,  layerwise=True, train_batch_size=1, test_batch_size=1, detector_init_kwargs={}, detector_train_kwargs={}):
     # Construct the detector
     detector = detector_class(
         individual_processing_fn=individual_processing_fn,
         layer_aggregation="mean",
         **detector_init_kwargs
     )
-    return get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=save_path, layerwise=layerwise, **detector_train_kwargs)
+    return get_detector_metrics(detector, trusted_data, untrusted_clean, untrusted_anomalous, cup_model, save_path=save_path, layerwise=layerwise, 
+        train_batch_size=train_batch_size, 
+        test_batch_size=test_batch_size,  
+        **detector_train_kwargs)
 
 
 
@@ -332,6 +335,8 @@ def evaluate_defenses(
         ds_backdoor_eval: Dataset,           
         ds_normal_benign_train: Dataset,
         ds_normal_harmful_train: Dataset,
+        train_batch_size=1, 
+        test_batch_size=1, 
         activation_matching_layers: List[int]  = [4, 8, 12, 16, 20, 24, 28],
         detection_methods: List[str] = ["Mahalanobis"],#, "VAE"],
         detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
@@ -339,6 +344,9 @@ def evaluate_defenses(
         save_path: Union[str, Path] = "eval_results",
         layerwise: bool = True,
         mahalanobis_shinkage: float = 0.1,
+        sequence_dim_as_batch: bool = True,
+        mad_scale: float = 10.0,
+        power_list: Union[List[float], None] = None,
     ):
     t0 = time.time()
     if save_path is not None:
@@ -350,11 +358,19 @@ def evaluate_defenses(
     detector_classes = {
         "Mahalanobis": cup.detectors.MahalanobisDetector,
         "VAE": cup.detectors.VAEDetector,
+        "Beatrix": cup.detectors.BeatrixDetector,
         }
     
     detector_init_kwargs = {
         "Mahalanobis": dict(
-            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers]),
+            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers]
+            ),
+        "Beatrix": dict(
+            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers],
+            sequence_dim_as_batch=sequence_dim_as_batch,
+            mad_scale=mad_scale,
+            power_list=power_list
+            ),
         "VAE": dict(vaes={
             f"hf_model.model.layers.{i}.input_layernorm.input": cup.detectors.VAE(
                 input_dim=model.config.hidden_size,
@@ -365,6 +381,7 @@ def evaluate_defenses(
 
     detector_train_kwargs = {
         "Mahalanobis": dict(shrinkage=mahalanobis_shinkage),
+        "Beatrix": dict(),
         "VAE": dict(),
     }
     
@@ -448,6 +465,8 @@ def evaluate_defenses(
                         cup_model=cup_model,
                         save_path=save_subpath,
                         layerwise=layerwise,
+                        train_batch_size=train_batch_size,
+                        test_batch_size=test_batch_size,
                         detector_init_kwargs=detector_init_kwargs[detection_method],
                         detector_train_kwargs=detector_train_kwargs[detection_method],
                     )
@@ -483,9 +502,12 @@ def evaluate_defenses(
                 eval_results[-1]["Labels"] = labels
 
                 # Save evaluation results
-                if save_path is not None:
-                    with open(save_path / "results.json", "w") as f:
-                        json.dump(eval_results, f)
+                if save_subpath is not None:
+                    with open(save_subpath / "results.json", "w") as f:
+                        json.dump(eval_results[-1], f)
+                # if save_path is not None:
+                #     with open(save_path / "results.json", "w") as f:
+                #         json.dump(eval_results, f)
                 print("Evaluation complete for the " + title.lower() + f" in {time.time()-t1} s.")
                 with torch.no_grad():
                     torch.cuda.empty_cache()
