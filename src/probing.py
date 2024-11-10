@@ -394,8 +394,8 @@ def train_online_probe(
     layers,
     lora_params={},
     adversarial_training=False,
-    probe_lr=2e-3,
-    adapter_lr=2e-5,
+    probe_lr=1e-3,
+    adapter_lr=5e-5,
     kl_penalty=1.0,
     max_length=1024,
     n_steps=1000,
@@ -426,6 +426,7 @@ def train_online_probe(
     adapter_optimizer = torch.optim.AdamW(lora_model.parameters(), lr=adapter_lr)
 
     # Tokenize and prepare input data
+    encoder.tokenizer.padding_side = "right"
     positive_tokens = encoder.tokenizer(
         positive_examples,
         padding=True,
@@ -449,17 +450,19 @@ def train_online_probe(
         pos_only_return_mask = get_valid_token_mask(
             positive_input_ids, only_return_on_tokens_between
         )
-        zero_positive_mask = positive_attention_mask.clone()
-        zero_positive_mask[~pos_only_return_mask] = 0
+        # zero_positive_mask = positive_attention_mask.clone() # Remove these lines
+        # zero_positive_mask[~pos_only_return_mask] = 0
+        zero_positive_mask = pos_only_return_mask  # Just use the target mask directly
 
         neg_only_return_mask = get_valid_token_mask(
             negative_input_ids, only_return_on_tokens_between
         )
-        zero_negative_mask = negative_attention_mask.clone()
-        zero_negative_mask[~neg_only_return_mask] = 0
+        # zero_negative_mask = negative_attention_mask.clone() # Remove these lines
+        # zero_negative_mask[~neg_only_return_mask] = 0
+        zero_negative_mask = neg_only_return_mask  # Just use the target mask directly
     else:
-        zero_positive_mask = positive_attention_mask
-        zero_negative_mask = negative_attention_mask
+        zero_positive_mask = torch.ones_like(positive_input_ids).bool()
+        zero_negative_mask = torch.ones_like(negative_input_ids).bool()
 
     # This is only relevant for adversarial training
     if only_choose_prompt_tokens_between is not None:
@@ -511,8 +514,6 @@ def train_online_probe(
             with torch.autocast(device_type=device):
 
                 if adversarial_training and current_step > start_adv_training_at_step:
-                    clear_hooks(lora_model)
-
                     # Print this out at the first adversarial training step
                     if current_step == start_adv_training_at_step + 1:
                         print("FORMATTING EXAMPLES FOR ADVERSARIAL TRAINING")
@@ -562,7 +563,7 @@ def train_online_probe(
 
                 pos_output = lora_model(
                     input_ids=pos_batch_input_ids,
-                    attention_mask=pos_batch_attention_mask,
+                    # attention_mask=pos_batch_attention_mask,
                     output_hidden_states=True,
                 )
                 pos_acts = {
@@ -581,6 +582,9 @@ def train_online_probe(
                     )
                     pos_loss += pos_layer_loss
 
+            # Backward pass on positive examples
+            pos_loss.backward(retain_graph=True)
+
             for wrapper in wrappers:
                 wrapper.enabled = False
 
@@ -588,7 +592,7 @@ def train_online_probe(
             with torch.autocast(device_type=device):
                 neg_output = lora_model(
                     input_ids=neg_batch_input_ids,
-                    attention_mask=neg_batch_attention_mask,
+                    # attention_mask=neg_batch_attention_mask,
                     output_hidden_states=True,
                 )
                 neg_logits = neg_output.logits
@@ -608,30 +612,28 @@ def train_online_probe(
                     )
                     neg_loss += neg_layer_loss
 
+            # Backward pass on negative examples
+            neg_loss.backward(retain_graph=True)
+
             # Compute KL divergence of logits from base model logits
             with torch.no_grad():
                 base_neg_output = encoder.model(
                     input_ids=neg_batch_input_ids,
-                    attention_mask=neg_batch_attention_mask,
+                    # attention_mask=neg_batch_attention_mask,
                 )
 
+            # Get logits only for masked positions
+            base_logits = base_neg_output.logits[neg_batch_zero_mask]
+            model_logits = neg_logits[neg_batch_zero_mask]
+
             kl_loss = F.kl_div(
-                F.log_softmax(base_neg_output.logits, dim=-1),
-                F.softmax(neg_logits, dim=-1),
+                F.log_softmax(base_logits, dim=-1),
+                F.softmax(model_logits, dim=-1),
                 reduction="batchmean",
             )
 
-            # Backward pass
-            pos_loss.backward(retain_graph=True)
-            neg_loss.backward(retain_graph=True)
+            # Backward pass on KL divergence
             (kl_loss / (kl_loss.detach() + 1e-8) * kl_penalty).backward()
-
-            if clip_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(lora_model.parameters(), clip_grad_norm)
-                all_probe_params = [
-                    param for probe in probes.values() for param in probe.parameters()
-                ]
-                torch.nn.utils.clip_grad_norm_(all_probe_params, clip_grad_norm)
 
             # Accumulate losses
             accumulated_probe_loss += pos_loss.item() + neg_loss.item()
@@ -646,9 +648,24 @@ def train_online_probe(
             if (i // batch_size + 1) % n_grad_accum == 0 or (
                 i + batch_size
             ) >= n_examples:
+
+                # Clip the gradients if specified
+                if clip_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        lora_model.parameters(), clip_grad_norm
+                    )
+                    all_probe_params = [
+                        param
+                        for probe in probes.values()
+                        for param in probe.parameters()
+                    ]
+                    torch.nn.utils.clip_grad_norm_(all_probe_params, clip_grad_norm)
+
+                # Perform optimization step on probe and adapter weights
                 for optimizer in optimizers.values():
                     optimizer.step()
                     optimizer.zero_grad()
+
                 adapter_optimizer.step()
                 adapter_optimizer.zero_grad()
 
@@ -688,6 +705,7 @@ def train_online_probe(
                 accumulated_probe_pgd_loss = 0
                 accumulated_probe_loss = 0
                 accumulated_kl_loss = 0
+                steps_since_last_log = 0
 
             if current_step >= n_steps:
                 continue_training_next_epoch = False
