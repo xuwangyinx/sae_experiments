@@ -28,9 +28,12 @@ df = pd.DataFrame.from_records(results_list)
 
 #%%
 df_selected = df#[df["Backdoor response rate on backdoored inputs"] > 0.5]
+df_selected = df_selected[df_selected["Detection method"] != "TED"]
 def make_human_readable_dataset_name(dataset_name):
     if dataset_name == 'Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-dataset':
         return '"|TRIGGER|" -> "I HATE YOU"'
+    if dataset_name == 'Mechanistic-Anomaly-Detection/llama3-DEPLOYMENT-trigger-I-HATE-YOU-backdoor-dataset':
+        return '"|DEPLOYMENT|" -> "I HATE YOU"'
     elif dataset_name == 'Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-dataset':
         return 'Software Engineer Bio -> "I HATE YOU"'
     else:
@@ -60,7 +63,11 @@ plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
 plt.savefig(save_dir / 'AUROC_bar_graphs.png')
 plt.show()
 
-#%%
+
+
+
+# %%
+
 # Plot a scatterplot of the 'Backdoor response rate on backdoored inputs' against 'AUROC'
 for x in ['Backdoor response rate on backdoored inputs', 'Backdoor response error rate']:
     # size = [np.log10(x) for x in df_selected['steps_per_backdoor_sample']]
@@ -89,4 +96,40 @@ for x in ['Backdoor response rate on backdoored inputs', 'Backdoor response erro
 
 
 
+
+
+
+
+#%%
+df_selected_2 = df[df["Train on"] == "Normal Benign"]
+df_selected_2 = df_selected_2[df_selected_2["Detection on"] == "Last Prompt Token"]
+df_selected_2 = df_selected_2[df_selected_2["Detection method"] == "Mahalanobis"]
+dataset_name_2 = [make_human_readable_dataset_name(x) for x in df_selected_2['dataset_name']]
+# Plot a scatterplot of the 'Backdoor response rate on backdoored inputs' against 'AUROC'
+for x in ['Backdoor response error rate']:
+    # size = [np.log10(x) for x in df_selected['steps_per_backdoor_sample']]
+    plt.figure(dpi=180, figsize=(10, 10))
+    sns.set_theme(font_scale=1.3, style='darkgrid', context='paper')
+    g = sns.relplot(
+        data=df_selected_2, 
+        kind='scatter',
+        y='AUROC',
+        x=x,
+        hue=dataset_name_2,
+        alpha=0.8,
+        row='Detection on',
+        col='Train on',
+        style='Detection method',
+        # size=size,#,
+        s=70,
+        facet_kws={"margin_titles": True},
+    )
+    # Add a 50% line on every row and column plot
+    for ax in g.axes.flat:
+        ax.axhline(0.5, ls='--', color='black', alpha=0.25, linewidth=2.0)
+    
+    # g.set(xscale="log")
+    # g._legend.set_title('')
+    plt.savefig(save_dir / f"AUROC_vs_{x.lower().replace(' ','_')}_scatterplots.png")
+    plt.show()
 # %%

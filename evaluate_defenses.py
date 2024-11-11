@@ -519,10 +519,10 @@ def evaluate_defenses(
                     save_subpath = save_path / f"{detection_method.lower().replace(' ','_')}/{train_on_method.lower().replace(' ','_')}/{detect_on_method.lower().replace(' ','_')}"
                     save_subpath.mkdir(parents=True, exist_ok=True)
 
-                if detection_method == "Mahalanobis":
-                    context = torch.no_grad()
-                else:
+                if detection_method == "VAE":
                     context = torch.autocast(device_type="cuda")
+                else:
+                    context = torch.no_grad()
                                 
                 with context:
                     metrics, scores, labels = get_detection_result(

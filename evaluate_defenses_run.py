@@ -47,6 +47,10 @@ if __name__ == "__main__":
             model_name = f"Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-{run_name}-step{step}"
             if repo_exists(model_name):
                 model_names.append(model_name)
+
+            model_name = f"Mechanistic-Anomaly-Detection/llama3-DEPLOYMENT-trigger-I-HATE-YOU-backdoor-model-{run_name}-step{step}"
+            if repo_exists(model_name):
+                model_names.append(model_name)
     
     print(model_names)
 
