@@ -128,7 +128,7 @@ for x in ['Backdoor response error rate']:
     for ax in g.axes.flat:
         ax.axhline(0.5, ls='--', color='black', alpha=0.25, linewidth=2.0)
     
-    # g.set(xscale="log")
+    g.set(xscale="log")
     # g._legend.set_title('')
     plt.savefig(save_dir / f"AUROC_vs_{x.lower().replace(' ','_')}_scatterplots.png")
     plt.show()
