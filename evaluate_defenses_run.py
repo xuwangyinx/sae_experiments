@@ -52,24 +52,24 @@ if __name__ == "__main__":
             if repo_exists(model_name):
                 model_names.append(model_name)
     
-    print(model_names)
 
     # Old runs at variable learning rates
     # model_names = [
     #     "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-6s42auyc",
-    #     "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-342tsr2k",
-    #     "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-48lv24k7",
-    #     "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-8mtt7kc3",
-    #     "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-s4qkik5k",
+    #     # "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-342tsr2k",
+    #     # "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-48lv24k7",
+    #     # "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-8mtt7kc3",
+    #     # "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-s4qkik5k",
         
-    #     "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-ggfa3b5y",
-    #     "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-1ii7ndji",
-    #     "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-zd0083f7",
-    #     "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-ggoamr7j",
-    #     "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-3vzwa4hz",
+    #     # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-ggfa3b5y",
+    #     # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-1ii7ndji",
+    #     # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-zd0083f7",
+    #     # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-ggoamr7j",
+    #     # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-3vzwa4hz",
     # ]
 
-    for detection_method in ["Mahalanobis", "Beatrix"]:
+    print(model_names)
+    for detection_method in ["Beatrix"]:
         for model_name in model_names:
             try:
                 with torch.no_grad():

@@ -64,15 +64,33 @@ class CupData(torch.utils.data.Dataset):
         return self.dataset[idx], 1
 
 
-def get_all_instruction_acts(
-    activation: torch.Tensor, inputs: list[str], name: str
+def get_prompt_acts(
+    activation: torch.Tensor, inputs: list[str], name: str, 
+    cup_model: Union[cup.models.HuggingfaceLM, None] = None
 ):
-    return activation
+    # The activation should be (batch, sequence, residual dimension)
+    assert activation.ndim == 3, activation.shape
+    batch_size = len(inputs)
+    assert cup_model is not None, "The cup_model must be provided for instruction detection"
+
+    # Tokenize the inputs to know how many tokens there are.
+    # It's a bit unfortunate that we're doing this twice (once here,
+    # once in the model forward pass), but not a huge deal.
+    tokens = cup_model.tokenize(inputs, **cup_model.tokenize_kwargs)
+    last_non_padding_index = tokens["attention_mask"].sum(dim=1) - 1
+    act = activation[range(batch_size)]
+    # Zero the activations after the last prompt token
+    for i in range(batch_size):
+        act[i, last_non_padding_index[i]:, :] = 0.0
+    act = act[:, :last_non_padding_index.max(), :]
+    return act
+
 
 def check_start(index, token, tokens):
     if index < 1 or index >= len(tokens) - 1:
         return False
     return tokens[index+1] == "\n\n" and tokens[index-1] == "assistant"
+
 
 def generation_detection(index, token, tokens):
     return token == "<|eot_id|>"
@@ -248,7 +266,7 @@ def evaluate_from_huggingface(
         backdoored_name = "backdoored_train",
         wandb_user = "jordantensor",
         wandb_project = "mad-backdoors",
-        n_train = 1024,
+        n_train = 512,
         n_eval = 512,
         **kwargs
     ):
@@ -406,7 +424,7 @@ def evaluate_defenses(
         ds_normal_harmful_train: Dataset,
         train_batch_size=1, 
         test_batch_size=1, 
-        activation_matching_layers: List[int]  = [4, 8, 12, 16, 20, 24, 28],
+        activation_matching_layers: List[int]  = list(range(0, 32, 1)),
         detection_methods: List[str] = ["Mahalanobis", "Beatrix", "VAE"],#, "VAE"],
         detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
         train_on: List[str] = ["Normal Benign", "Normal Harmful", "Normal Benign + Normal Harmful"],
@@ -414,9 +432,10 @@ def evaluate_defenses(
         model_info: dict = {},
         layerwise: bool = True,
         mahalanobis_shinkage: float = 0.1,
-        sequence_dim_as_batch: bool = True,
+        sequence_dim_as_batch: bool = False,
         mad_scale: float = 10.0,
         power_list: Union[List[float], None] = None,
+        moving_average=True,
     ):
     t0 = time.time()
     if save_path is not None:
@@ -439,7 +458,8 @@ def evaluate_defenses(
             activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers],
             sequence_dim_as_batch=sequence_dim_as_batch,
             mad_scale=mad_scale,
-            power_list=power_list
+            power_list=power_list,
+            moving_average=moving_average,
             ),
         "VAE": dict(vaes={
             f"hf_model.model.layers.{i}.input_layernorm.input": cup.detectors.VAE(
@@ -469,7 +489,7 @@ def evaluate_defenses(
     
     individual_processing_fns = {
         "Last Prompt Token": cup_model.make_last_token_hook(),
-        "Prompt": get_all_instruction_acts,
+        "Prompt": partial(get_prompt_acts, cup_model=cup_model),
         "Generation": partial(get_generation_acts, cup_model=cup_model)
     }
 
@@ -554,7 +574,12 @@ def evaluate_defenses(
                     "Eval n_train": len(trusted_data),
                     "Eval n_eval": len(untrusted_clean),
                     "Figures saved at": str(save_subpath),
-                    **model_info
+                    **model_info,
+                    "layerwise": layerwise,
+                    "mahalanobis_shinkage": mahalanobis_shinkage,
+                    "sequence_dim_as_batch": sequence_dim_as_batch,
+                    "mad_scale": mad_scale,
+                    "power_list": power_list,
                 })
                 for layer in metrics:
                     if layer == "all":
