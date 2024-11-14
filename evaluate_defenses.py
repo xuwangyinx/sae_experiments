@@ -6,7 +6,7 @@ from tkinter import E
 from typing import Union
 import copy
 from functools import partial
-from typing import List
+from typing import List, Literal, Union
 
 from matplotlib import pyplot as plt
 import fire
@@ -425,7 +425,7 @@ def evaluate_defenses(
         train_batch_size=1, 
         test_batch_size=1, 
         activation_matching_layers: List[int]  = list(range(0, 32, 1)),
-        detection_methods: List[str] = ["Mahalanobis", "Beatrix", "VAE"],#, "VAE"],
+        detection_methods: List[str] = ["Mahalanobis", "Beatrix", "TED", "VAE"],
         detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
         train_on: List[str] = ["Normal Benign", "Normal Harmful", "Normal Benign + Normal Harmful"],
         save_path: Union[str, Path] = "eval_results",
@@ -436,6 +436,11 @@ def evaluate_defenses(
         mad_scale: float = 10.0,
         power_list: Union[List[float], None] = None,
         moving_average=True,
+        n_neighbors: int = 10,
+        contamination: float = 0.1,
+        normalize_ranks: bool = False,
+        store_acts_on_cpu: bool = True,
+        max_seq_len: Union[int, None] = 64,
     ):
     t0 = time.time()
     if save_path is not None:
@@ -448,18 +453,12 @@ def evaluate_defenses(
         "Mahalanobis": cup.detectors.MahalanobisDetector,
         "VAE": cup.detectors.VAEDetector,
         "Beatrix": cup.detectors.BeatrixDetector,
+        "TED": cup.detectors.TEDDetector,
         }
     
     detector_init_kwargs = {
         "Mahalanobis": dict(
             activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers]
-            ),
-        "Beatrix": dict(
-            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers],
-            sequence_dim_as_batch=sequence_dim_as_batch,
-            mad_scale=mad_scale,
-            power_list=power_list,
-            moving_average=moving_average,
             ),
         "VAE": dict(vaes={
             f"hf_model.model.layers.{i}.input_layernorm.input": cup.detectors.VAE(
@@ -467,12 +466,29 @@ def evaluate_defenses(
                 latent_dim=model.config.hidden_size//4, 
             ) for i in activation_matching_layers
         }),
+        "Beatrix": dict(
+            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers],
+            sequence_dim_as_batch=sequence_dim_as_batch,
+            mad_scale=mad_scale,
+            power_list=power_list,
+            moving_average=moving_average,
+            ),
+        "TED": dict(
+            activation_names=[f"hf_model.model.layers.{i}.input_layernorm.input" for i in activation_matching_layers],
+            n_neighbors=n_neighbors,
+            contamination=contamination,
+            normalize_ranks=normalize_ranks,
+            store_acts_on_cpu=store_acts_on_cpu,
+            sequence_dim_as_batch=sequence_dim_as_batch,
+            max_seq_len=max_seq_len,
+        ),
     }
 
     detector_train_kwargs = {
         "Mahalanobis": dict(shrinkage=mahalanobis_shinkage),
         "Beatrix": dict(),
         "VAE": dict(),
+        "TED": dict(),
     }
     
     # Check if the inputs are valid
@@ -498,7 +514,9 @@ def evaluate_defenses(
     untrusted_clean = None
 
     for detect_on_method in detect_on:
-        add_completion = detect_on_method == "Generation"
+        add_completion = (detect_on_method == "Generation")
+        truncate_seq_at = "end" if detect_on_method == "Generation" else "start"
+        detector_init_kwargs["TED"]["truncate_seq_at"] = truncate_seq_at
         for train_on_method in train_on:
             if train_on_method == "Normal Benign":
                 trusted_data = CupData(ds_normal_benign_train, add_completion=add_completion)
@@ -580,6 +598,13 @@ def evaluate_defenses(
                     "sequence_dim_as_batch": sequence_dim_as_batch,
                     "mad_scale": mad_scale,
                     "power_list": power_list,
+                    "moving_average": moving_average,
+                    "n_neighbors": n_neighbors,
+                    "contamination": contamination,
+                    "normalize_ranks": normalize_ranks,
+                    "store_acts_on_cpu": store_acts_on_cpu,
+                    "max_seq_len": max_seq_len,
+                    "Eval time": float(time.time()-t1),
                 })
                 for layer in metrics:
                     if layer == "all":
