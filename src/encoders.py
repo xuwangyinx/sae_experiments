@@ -373,6 +373,7 @@ class SparseAutoencoder:
         format_inputs=True,
         batch_size=4,
         system_prompt=None,
+        return_examples=True,
         **generation_kwargs,
     ):
         # Make sure prompts is a list
@@ -414,7 +415,10 @@ class SparseAutoencoder:
                 gen.replace(self.tokenizer.pad_token, "") for gen in batch_generations
             ]
             all_generations.extend(batch_generations)
-        return self.get_examples_from_generations(all_generations)
+        
+        if return_examples:
+            return self.get_examples_from_generations(all_generations)
+        return all_generations
 
     def _fix_input_shape(self, acts):
         if len(acts.shape) == 0:
@@ -700,7 +704,7 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
             model=model,
             tokenizer=tokenizer,
             hook_name=hook_name,
-            n_features=encoder.W_enc.shape[1],
+            n_features=encoder.W_enc.shape[1] if encoder is not None else None,
             max_k=max_k_features,
         )
         self.encoder = encoder
@@ -763,17 +767,18 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
             model_name = "google/gemma-2-9b-it" if instruct else "google/gemma-2-9b"
             model, tokenizer = load_hf_model_and_tokenizer(model_name)
 
-        # Download/Load the sae
-        repo_id = "google/gemma-scope-9b-pt-res"
-        filename = f"layer_{layer}/width_{width//10**3}k/average_l0_{l0}/params.npz"
-        sae_path = hf_hub_download(
-            repo_id=repo_id, filename=filename, repo_type="model"
-        )
-
         # Load sae weights into module
         if layer is None:
             sae = None
         else:
+            # Download/Load the sae
+            repo_id = "google/gemma-scope-9b-pt-res"
+            filename = f"layer_{layer}/width_{width//10**3}k/average_l0_{l0}/params.npz"
+            sae_path = hf_hub_download(
+                repo_id=repo_id, filename=filename, repo_type="model"
+            )
+
+            # Load the weights
             sae = (
                 GenericSaeModule(d_model=model.config.hidden_size, d_sae=width)
                 .cuda()
@@ -784,6 +789,7 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
                     sae_path, torch.bfloat16, "cuda"
                 )
             )
+
         return DeepmindSparseAutoencoder(
             model=model,
             tokenizer=tokenizer,
