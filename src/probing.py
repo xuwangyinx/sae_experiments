@@ -386,6 +386,21 @@ def initialize_lora_adapter(encoder, layers, lora_params):
     return lora_model
 
 
+def disable_model_gradients(lora_model):
+    for param in lora_model.parameters():
+        param.requires_grad_(False)
+
+
+def enable_model_gradients(lora_model):
+    n_layers = lora_model.config.num_hidden_layers
+    for i in range(n_layers):
+        for name, param in lora_model.get_submodule("base_model.model.model.layers")[
+            i
+        ].named_parameters():
+            if "lora_" in name:
+                param.requires_grad_(True)
+
+
 def train_online_probe(
     encoder,
     positive_examples,
@@ -394,9 +409,10 @@ def train_online_probe(
     layers,
     lora_params={},
     adversarial_training=False,
+    universal_attack=False,
     probe_lr=1e-3,
     adapter_lr=5e-5,
-    kl_penalty=1.0,
+    kl_penalty=1e-2,
     max_length=1024,
     n_steps=1000,
     n_steps_per_logging=100,
@@ -408,9 +424,10 @@ def train_online_probe(
     only_choose_prompt_tokens_between=None,
     epsilon=10.0,
     adversary_lr=1e-3,
-    pgd_iterations=64,
+    pgd_iterations=32,
     clip_grad_norm=1.0,
     start_adv_training_at_step=1024,
+    reset_attack_every=10,
     **kwargs,
 ):
     assert n_grad_accum == 0 or n_steps % n_grad_accum == 0
@@ -486,6 +503,10 @@ def train_online_probe(
     accumulated_kl_loss = 0
     steps_since_last_log = 0
 
+    wrappers = []
+    adversaries = []
+    pgd_probe_loss = 0
+
     while continue_training_next_epoch:
 
         # Shuffle the examples
@@ -513,9 +534,9 @@ def train_online_probe(
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
 
-                if adversarial_training and current_step > start_adv_training_at_step:
+                if adversarial_training and current_step >= start_adv_training_at_step:
                     # Print this out at the first adversarial training step
-                    if current_step == start_adv_training_at_step + 1:
+                    if current_step == start_adv_training_at_step:
                         print("FORMATTING EXAMPLES FOR ADVERSARIAL TRAINING")
                         print("This is the target mask:")
                         print(
@@ -536,21 +557,90 @@ def train_online_probe(
                             )
                         )
 
-                    losses, wrappers = train_attack(
-                        adv_tokens=pos_batch_input_ids,
-                        prompt_mask=pos_batch_only_choose_mask,
-                        target_mask=pos_batch_zero_mask,
-                        model=lora_model,
-                        model_layers_module="base_model.model.model.layers",
-                        layer=["embedding"],
-                        epsilon=epsilon,
-                        learning_rate=adversary_lr,
-                        pgd_iterations=pgd_iterations,
-                        probes=probes,
-                        adversary_type="pgd",
-                    )
-                    pgd_toward_loss = losses["toward"]
-                    pgd_probe_loss = losses["probe"]
+                    # Disable model gradients
+                    disable_model_gradients(lora_model)
+
+                    if universal_attack:
+                        # Reset the attack if the time is right
+                        if (
+                            current_step
+                            - start_adv_training_at_step % reset_attack_every
+                            == 0
+                            or pgd_probe_loss >= 6.0
+                        ):
+
+                            print("RESETTING ATTACKS")
+                            clear_hooks(lora_model)
+                            wrappers = []
+                            adversaries = []
+
+                            # Finetune an existing attack against all inputs
+                            losses, wrappers, adversaries = train_universal_attack(
+                                adv_tokens=positive_input_ids,
+                                target_mask=zero_positive_mask,
+                                model=lora_model,
+                                model_layers_module="base_model.model.model.layers",
+                                layer=["embedding"],
+                                epsilon=epsilon,
+                                learning_rate=adversary_lr,
+                                n_steps=1024,
+                                verbose=True,
+                                batch_size=batch_size,
+                                gradient_accumulation_steps=4,
+                                probes=probes,
+                                return_adversaries=True,
+                                adversary_type="soft_prompt",
+                            )
+                            print(losses)
+
+                        else:
+
+                            # Finetune an existing attack against all inputs
+                            losses, wrappers, adversaries = train_universal_attack(
+                                adv_tokens=positive_input_ids,
+                                target_mask=zero_positive_mask,
+                                model=lora_model,
+                                model_layers_module="base_model.model.model.layers",
+                                layer=["embedding"],
+                                epsilon=epsilon,
+                                learning_rate=adversary_lr,
+                                n_steps=pgd_iterations,
+                                batch_size=batch_size,
+                                gradient_accumulation_steps=4,
+                                probes=probes,
+                                adversaries=(
+                                    adversaries if len(adversaries) > 0 else None
+                                ),
+                                wrappers=wrappers if len(wrappers) > 0 else None,
+                                return_adversaries=True,
+                                adversary_type="soft_prompt",
+                            )
+
+                        pgd_toward_loss = losses["toward"]
+                        pgd_probe_loss = losses["probe"]
+
+                    else:
+                        # Train new attack from scratch against batch inputs
+                        losses, wrappers = train_attack(
+                            adv_tokens=pos_batch_input_ids,
+                            prompt_mask=pos_batch_only_choose_mask,
+                            target_mask=pos_batch_zero_mask,
+                            model=lora_model,
+                            model_layers_module="base_model.model.model.layers",
+                            layer=["embedding"],
+                            epsilon=epsilon,
+                            learning_rate=adversary_lr,
+                            pgd_iterations=pgd_iterations,
+                            probes=probes,
+                            adversary_type="pgd",
+                        )
+
+                        pgd_toward_loss = losses["toward"]
+                        pgd_probe_loss = losses["probe"]
+
+                    # Enable model gradients on the lora adapter
+                    enable_model_gradients(lora_model)
+
                 else:
                     pgd_toward_loss = (
                         0  # Set to 0 when adversarial training is not used
@@ -661,10 +751,13 @@ def train_online_probe(
                     ]
                     torch.nn.utils.clip_grad_norm_(all_probe_params, clip_grad_norm)
 
-                # Perform optimization step on probe and adapter weights
-                for optimizer in optimizers.values():
-                    optimizer.step()
-                    optimizer.zero_grad()
+                # Optimize probes only when not using adversarial training
+                if not (
+                    adversarial_training and current_step > start_adv_training_at_step
+                ):
+                    for optimizer in optimizers.values():
+                        optimizer.step()
+                        optimizer.zero_grad()
 
                 adapter_optimizer.step()
                 adapter_optimizer.zero_grad()

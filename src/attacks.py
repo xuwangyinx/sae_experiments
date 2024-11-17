@@ -521,54 +521,70 @@ def train_universal_attack(
     clip_grad=1,
     adversary_type="soft_prompt",
     verbose=False,
+    adversaries=None,  # Pass in existing adversaries directly
+    wrappers=None,  # Pass in existing wrappers directly
+    return_adversaries=False,  # Option to return adversaries
 ):
-    # Clear and initialize the adversary
-    clear_hooks(model)
-    if isinstance(layer, int):
-        layer = [layer]
+    # Clear hooks
+    if adversaries is None:
+        # We dont want to clear any hooks if adversaries are provided
+        clear_hooks(model)
 
-    if adversary_type == "low_rank":
-        create_adversary = lambda x: LowRankAdversary(
-            dim=model.config.hidden_size,
-            rank=16,
-            device=device,
-            zero_init=True,
+    # Only create new adversaries if none are provided
+    if adversaries is None:
+        if isinstance(layer, int):
+            layer = [layer]
+
+        if adversary_type == "low_rank":
+            create_adversary = lambda x: LowRankAdversary(
+                dim=model.config.hidden_size,
+                rank=16,
+                device=device,
+                zero_init=True,
+            )
+        elif adversary_type == "vector":
+            create_adversary = lambda x: UniversalVectorAdversary(
+                dim=model.config.hidden_size,
+                epsilon=epsilon,
+                device=device,
+            )
+        elif adversary_type == "soft_prompt":
+            create_adversary = lambda x: UniversalSoftPromptAdversary(
+                dim=model.config.hidden_size,
+                epsilon=epsilon,
+                length=15,
+                device=device,
+            )
+        else:
+            raise ValueError(f"Adversary type {adversary_type} not recognized")
+
+        adversary_locations = [
+            (f"{model_layers_module}", f"{layer_i}")
+            for layer_i in layer
+            if isinstance(layer_i, int)
+        ]
+        if "embedding" in layer:
+            adversary_locations.append(
+                (model_layers_module.replace(".layers", ""), "embed_tokens")
+            )
+
+        adversaries, wrappers = add_hooks(
+            model,
+            create_adversary=create_adversary,
+            adversary_locations=adversary_locations,
         )
-    elif adversary_type == "vector":
-        create_adversary = lambda x: UniversalVectorAdversary(
-            dim=model.config.hidden_size,
-            epsilon=epsilon,
-            device=device,
-        )
-    elif adversary_type == "soft_prompt":
-        create_adversary = lambda x: UniversalSoftPromptAdversary(
-            dim=model.config.hidden_size,
-            epsilon=epsilon,
-            length=15,
-            device=device,
-        )
+    elif wrappers is None:
+        raise ValueError("Wrappers must be provided if adversaries are provided")
     else:
-        raise ValueError(f"Adversary type {adversary_type} not recognized")
+        for wrapper in wrappers:
+            wrapper.enabled = True
 
-    adversary_locations = [
-        (f"{model_layers_module}", f"{layer_i}")
-        for layer_i in layer
-        if isinstance(layer_i, int)
-    ]
-    if "embedding" in layer:
-        adversary_locations.append(
-            (model_layers_module.replace(".layers", ""), "embed_tokens")
-        )
-
-    adversaries, wrappers = add_hooks(
-        model,
-        create_adversary=create_adversary,
-        adversary_locations=adversary_locations,
-    )
+    # Get parameters of each part of the attack for optimization
     params = [p for adv in adversaries for p in adv.parameters()]
 
     # Define optimization utils
     adv_optim = torch.optim.AdamW(params, lr=learning_rate)
+    adv_optim.zero_grad()  # Zero out gradients in case
 
     # Ensure n_steps is divisible by gradient_accumulation_steps
     assert (
@@ -586,7 +602,10 @@ def train_universal_attack(
     losses = None
     loss_over_time = [] if return_loss_over_time else None
 
-    for step in tqdm(range(n_steps), disable=not verbose):
+    # Create progress bar
+    pbar = tqdm(range(n_steps), disable=not verbose)
+
+    for step in pbar:
         try:
             batch_tokens, batch_target_mask = next(data_iterator)
         except StopIteration:
@@ -618,6 +637,9 @@ def train_universal_attack(
             l2_loss.backward()
             losses["l2_norm"] = reg_loss.item() / np.sqrt(num_el)
 
+        # Update progress bar with current losses
+        pbar.set_postfix(losses)
+
         # Perform optimization step if gradient accumulation is complete
         if (step + 1) % gradient_accumulation_steps == 0:
             for adv in adversaries:
@@ -636,4 +658,11 @@ def train_universal_attack(
             if return_loss_over_time:
                 loss_over_time.append(copy.deepcopy(losses))
 
-    return (loss_over_time, wrappers) if return_loss_over_time else (losses, wrappers)
+    if return_loss_over_time and return_adversaries:
+        return loss_over_time, wrappers, adversaries
+    elif return_loss_over_time:
+        return loss_over_time, wrappers
+    elif return_adversaries:
+        return losses, wrappers, adversaries
+    else:
+        return losses, wrappers
