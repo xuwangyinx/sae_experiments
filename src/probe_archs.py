@@ -27,7 +27,6 @@ class LinearProbe(Probe):
         self.linear = nn.Linear(d_model, 1)
 
     def forward(self, x):
-        x = super().forward(x)
         return self.linear(x).squeeze(-1)
 
 
@@ -40,7 +39,6 @@ class QuadraticProbe(Probe):
         self.linear = nn.Linear(d_model, 1)
 
     def forward(self, x):
-        x = super().forward(x)
         batch_dims = x.shape[:-1]
         x_flat = x.view(-1, x.shape[-1])
         xM = torch.matmul(x_flat.unsqueeze(1), self.M)
@@ -62,7 +60,6 @@ class NonlinearProbe(Probe):
         )
 
     def forward(self, x):
-        x = super().forward(x)
         return self.mlp(x).squeeze(-1)
 
 
@@ -97,7 +94,6 @@ class AttentionProbe(Probe):
         return causal_mask & windowed_mask
 
     def forward(self, x):
-        x = super().forward(x)
         batch_size, seq_len, _ = x.shape
         q = (
             self.q_proj(x)
@@ -143,7 +139,6 @@ class DirectionalProbe(Probe):
         )  #  We can train this to calibrate the probe
 
     def forward(self, x):
-        x = super().forward(x)
         return torch.matmul(x, self.direction * self.magnitude).squeeze(-1) + self.bias
 
 
@@ -156,7 +151,6 @@ class OrthogonalEnsembleProbe(Probe):
         self.n_probes = n_probes
 
     def forward(self, x):
-        x = super().forward(x)
         return self.linear(x)
 
     def compute_loss(self, acts, labels, mask=None):
@@ -280,7 +274,6 @@ class SubspaceProbe(Probe):
 
     def forward(self, x):
         # Forward pass computes logits for both subspace and orthogonal complement
-        x = super().forward(x)
 
         # Get projection magnitudes
         subspace_mag, orthogonal_mag = self._compute_projections(x)

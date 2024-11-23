@@ -593,7 +593,7 @@ def prompt_centric_view_generic(token_act_pairs, title="Generic Prompt-Centric V
         for example in token_act_pairs
     ):
         raise ValueError(
-            "Input should be a list of lists of (token, activation) tuples."
+            f"Input should be a list of lists of (token, activation) tuples., is instead {type(token_act_pairs)}"
         )
 
     # Separate tokens and activations for each example

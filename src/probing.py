@@ -20,6 +20,7 @@ from .probe_archs import *
 from .utils import (
     convert_float16,
     convert_seconds_to_time_str,
+    convert_to_serializable,
     get_valid_indices,
     get_valid_token_mask,
 )
@@ -29,11 +30,11 @@ class Probe(nn.Module):
     # Base class for all probes
 
     def __init__(self):
-        super(Probe, self).__init__()
+        super().__init__()
 
     def forward(self, x):
         # assert x.dim() == 3, "Input must be of shape (batch_size, seq_len, d_model)"
-        return x
+        raise NotImplementedError
 
     def compute_loss(self, acts, labels, mask=None):
         # acts should be of shape (d1, d2, ..., dn, d_model)
@@ -387,11 +388,13 @@ def initialize_lora_adapter(encoder, layers, lora_params):
 
 
 def disable_model_gradients(lora_model):
+    # Disables all model gradients
     for param in lora_model.parameters():
         param.requires_grad_(False)
 
 
 def enable_model_gradients(lora_model):
+    # Enables lora adapter gradients
     n_layers = lora_model.config.num_hidden_layers
     for i in range(n_layers):
         for name, param in lora_model.get_submodule("base_model.model.model.layers")[
@@ -428,6 +431,8 @@ def train_online_probe(
     clip_grad_norm=1.0,
     start_adv_training_at_step=1024,
     reset_attack_every=10,
+    freeze_probes_during_adversarial_training=True,
+    use_lora_adapter=True,
     **kwargs,
 ):
     assert n_grad_accum == 0 or n_steps % n_grad_accum == 0
@@ -439,8 +444,12 @@ def train_online_probe(
     probes = {layer: probe.to(device) for layer, probe in probes.items()}
 
     # Initialize LoRA adapter
-    lora_model = initialize_lora_adapter(encoder, layers, lora_params)
-    adapter_optimizer = torch.optim.AdamW(lora_model.parameters(), lr=adapter_lr)
+    if use_lora_adapter:
+        lora_model = initialize_lora_adapter(encoder, layers, lora_params)
+        adapter_optimizer = torch.optim.AdamW(lora_model.parameters(), lr=adapter_lr)
+    else:
+        lora_model = encoder.model
+        adapter_optimizer = None
 
     # Tokenize and prepare input data
     encoder.tokenizer.padding_side = "right"
@@ -464,19 +473,12 @@ def train_online_probe(
     negative_attention_mask = negative_tokens["attention_mask"]
 
     if only_return_on_tokens_between is not None:
-        pos_only_return_mask = get_valid_token_mask(
+        zero_positive_mask = get_valid_token_mask(
             positive_input_ids, only_return_on_tokens_between
         )
-        # zero_positive_mask = positive_attention_mask.clone() # Remove these lines
-        # zero_positive_mask[~pos_only_return_mask] = 0
-        zero_positive_mask = pos_only_return_mask  # Just use the target mask directly
-
-        neg_only_return_mask = get_valid_token_mask(
+        zero_negative_mask = get_valid_token_mask(
             negative_input_ids, only_return_on_tokens_between
         )
-        # zero_negative_mask = negative_attention_mask.clone() # Remove these lines
-        # zero_negative_mask[~neg_only_return_mask] = 0
-        zero_negative_mask = neg_only_return_mask  # Just use the target mask directly
     else:
         zero_positive_mask = torch.ones_like(positive_input_ids).bool()
         zero_negative_mask = torch.ones_like(negative_input_ids).bool()
@@ -752,15 +754,16 @@ def train_online_probe(
                     torch.nn.utils.clip_grad_norm_(all_probe_params, clip_grad_norm)
 
                 # Optimize probes only when not using adversarial training
-                if not (
+                if not freeze_probes_during_adversarial_training or not (
                     adversarial_training and current_step > start_adv_training_at_step
                 ):
                     for optimizer in optimizers.values():
                         optimizer.step()
                         optimizer.zero_grad()
 
-                adapter_optimizer.step()
-                adapter_optimizer.zero_grad()
+                if adapter_optimizer is not None:
+                    adapter_optimizer.step()
+                    adapter_optimizer.zero_grad()
 
             current_step += 1
 
@@ -914,7 +917,7 @@ def remove_scores_between_tokens(
 
             for layer_data in paired_scores.values():
                 layer_data[example_idx] = [
-                    (token, score if i in valid_indices else None)
+                    [token, score if i in valid_indices else None]
                     for i, (token, score) in enumerate(layer_data[example_idx])
                 ]
 
@@ -943,7 +946,7 @@ def get_annotated_dataset(
     # Get scores
     scores_dict = {}
     dataset_splits = {
-        split: dataset[split].select(range(min(1000, len(dataset[split]))))
+        split: dataset[split].select(range(min(3000, len(dataset[split]))))
         for split in splits
     }
     for split in splits:
@@ -971,6 +974,52 @@ def get_annotated_dataset(
         encoder.model = encoder.model.base_model
 
     return convert_float16(scores_dict)
+
+
+def load_or_create_annotated_dataset(
+    probes_folder,
+    file_name,
+    probes,
+    encoder,
+    jailbreaks_dataset,
+    datasets,
+    model_adapter_path=None,
+    max_length=8192,
+    batch_size=16,
+):
+    annotations_folder_name = os.path.join(probes_folder, file_name)
+
+    if os.path.exists(annotations_folder_name):
+        with open(annotations_folder_name, "r") as f:
+            return json.load(f)
+    else:
+        kwargs = {"max_length": max_length, "batch_size": batch_size}
+
+        if model_adapter_path:
+            kwargs["model_adapter_path"] = model_adapter_path
+
+        scores_dict = get_annotated_dataset(
+            probes, encoder, jailbreaks_dataset, datasets, **kwargs
+        )
+
+        # Save with enhanced serialization
+        with open(annotations_folder_name, "w") as f:
+            json.dump(scores_dict, f, default=convert_to_serializable)
+
+        return scores_dict
+
+
+def load_annotated_dataset(
+    probes_folder,
+    file_name,
+):
+    annotations_folder_name = os.path.join(probes_folder, file_name)
+
+    if os.path.exists(annotations_folder_name):
+        with open(annotations_folder_name, "r") as f:
+            return json.load(f)
+    else:
+        raise ValueError(f"File {annotations_folder_name} does not exist.")
 
 
 def vickrey_auc(scores, k):
@@ -1046,16 +1095,34 @@ def aggregate_across_tokens(all_split_scores, cross_token_aggregation):
     min_score, max_score = float("inf"), float("-inf")
 
     for split, split_scores in all_split_scores.items():
-        new_split_scores = []
-        for example in split_scores:
-            example_scores = [score for _, score in example if score is not None]
-            example_scalar = aggregation_func(example_scores)
-            new_split_scores.append(example_scalar)
 
-            min_score = min(min_score, example_scalar)
-            max_score = max(max_score, example_scalar)
+        if isinstance(split_scores, dict):
+            aggregated_scores[split] = {}
+            for layer in split_scores:
+                new_split_scores = []
+                for example in split_scores[layer]:
+                    example_scores = [
+                        score for _, score in example if score is not None
+                    ]
+                    example_scalar = aggregation_func(example_scores)
+                    new_split_scores.append(example_scalar)
 
-        aggregated_scores[split] = new_split_scores
+                    min_score = min(min_score, example_scalar)
+                    max_score = max(max_score, example_scalar)
+
+                aggregated_scores[split][layer] = new_split_scores
+
+        elif isinstance(split_scores, list):
+            new_split_scores = []
+            for example in split_scores:
+                example_scores = [score for _, score in example if score is not None]
+                example_scalar = aggregation_func(example_scores)
+                new_split_scores.append(example_scalar)
+
+                min_score = min(min_score, example_scalar)
+                max_score = max(max_score, example_scalar)
+
+            aggregated_scores[split] = new_split_scores
 
     return aggregated_scores, min_score, max_score
 

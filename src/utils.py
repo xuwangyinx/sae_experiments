@@ -1,15 +1,23 @@
 import heapq
 import os
 import subprocess
+import sys
 
 import numpy as np
+import pandas as pd
 import torch
 from accelerate import find_executable_batch_size
+from datasets import load_dataset
 from huggingface_hub import list_repo_files
 from peft import AutoPeftModelForCausalLM
 from sklearn.metrics import roc_auc_score
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, project_root)
+
+from automated_redteaming import run_autograder_on_dataset
 
 loaded_models = {}
 loaded_tokenizers = {}
@@ -836,3 +844,61 @@ def zero_nan_grads(model):
                 flag = True
                 p.grad[torch.isnan(p.grad)] = 0.0
     return flag
+
+
+def convert_to_serializable(obj):
+    if isinstance(obj, np.float32):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(elem) for elem in obj]
+    elif hasattr(obj, "__dict__"):
+        return convert_to_serializable(obj.__dict__)
+    return obj
+
+
+def measure_jailbreak_rate(
+    encoder,
+    dataset_name="Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-dataset",
+    split_name="normal_harmful_test",
+    n_examples=100,
+    batch_size=32,
+    max_new_tokens=200,
+    threshold=0.0,
+):
+    # Load the dataset
+    dataset = load_dataset(dataset_name)
+    splits_to_remove = [split for split in dataset.keys() if split != split_name]
+    for split in splits_to_remove:
+        dataset.pop(split)
+    dataset[split_name] = dataset[split_name].remove_columns(["completion"])
+
+    # Generate completions for the dataset
+    dataset = dataset_generate_completions(
+        dataset,
+        encoder.model,
+        encoder.tokenizer,
+        batch_size=batch_size,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+    )
+
+    # Run the autograder on the dataset
+    dataset[split_name] = run_autograder_on_dataset(
+        dataset[split_name], "prompt", "completion", max_workers=32
+    )
+
+    # Compute the refusal rate
+    scores = dataset[split_name]["score"]
+    valid_scores = [score for score in scores if not pd.isna(score)]
+
+    if not valid_scores:
+        return 0.0
+
+    refusal_rate = sum(1 for score in valid_scores if score > threshold) / len(
+        valid_scores
+    )
+    return refusal_rate, dataset

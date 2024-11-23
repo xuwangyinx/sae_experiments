@@ -415,7 +415,7 @@ class SparseAutoencoder:
                 gen.replace(self.tokenizer.pad_token, "") for gen in batch_generations
             ]
             all_generations.extend(batch_generations)
-        
+
         if return_examples:
             return self.get_examples_from_generations(all_generations)
         return all_generations
@@ -429,6 +429,40 @@ class SparseAutoencoder:
 
     def __repr__(self):
         return f"{self.__class__.__name__}(hook_name={self.hook_name}, n_features={self.n_features}, max_k={self.max_k})"
+
+
+class LanguageModelWrapper(SparseAutoencoder):
+    # Wrapper class for language models
+
+    def __init__(self, model, tokenizer):
+        super().__init__(
+            model=model,
+            tokenizer=tokenizer,
+            hook_name="",
+            n_features=None,
+            max_k=None,
+        )
+
+    def featurize(self, tokens, masks=None):
+        raise NotImplementedError()
+
+    def sample_generations(
+        self,
+        prompts,
+        format_inputs=True,
+        batch_size=4,
+        system_prompt=None,
+        **generation_kwargs,
+    ):
+        # Never convert the generations to SAE Examples
+        return super().sample_generations(
+            prompts,
+            format_inputs,
+            batch_size,
+            system_prompt,
+            False,
+            **generation_kwargs,
+        )
 
 
 class SparseAutoencoderCollection(SparseAutoencoder):
