@@ -720,12 +720,17 @@ if __name__ == "__main__":
     parser.add_argument("--abhay_jailbreaks", action="store_true")
     args = parser.parse_args()
 
-    # load tokenizer and model and pretrained probes
-    model = AutoPeftModelForCausalLM.from_pretrained(args.save_name, torch_dtype=torch.bfloat16,          
-                low_cpu_mem_usage=True,
-                # attn_implementation="flash_attention_2",
-                device_map="cuda",
-                trust_remote_code=True,)
+    # # load tokenizer and model and pretrained probes
+    try:
+        model = AutoPeftModelForCausalLM.from_pretrained(args.save_name, torch_dtype=torch.bfloat16,          
+                    low_cpu_mem_usage=True,
+                    # attn_implementation="flash_attention_2",
+                    device_map="cuda",
+                    trust_remote_code=True,)
+    except Exception as e:
+        print(e)
+        print(f"Falling back to AutoModelForCausalLM")
+        model = AutoModelForCausalLM.from_pretrained(args.save_name, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"

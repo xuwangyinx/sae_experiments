@@ -46,6 +46,7 @@ parser.add_argument("--eval_pretrained_probes", action="store_true",
                     help="Whether to evaluate pretrained probes")
 parser.add_argument('--train_mt', action='store_true',
                     help='Whether to train on (augmented) multi turn data')
+parser.add_argument('--lora', action='store_true')
 args = parser.parse_args()
 model_name_or_path = args.model_name_or_path
 model_type = args.model_type
@@ -53,7 +54,7 @@ probe_type = args.probe_type
 use_sft = args.use_sft
 num_steps = args.num_steps
 train_mt = args.train_mt
-save_name = f"lora_{model_type}_{probe_type}_mt{train_mt}"
+save_name = f"lora{args.lora}_{model_type}_{probe_type}_mt{train_mt}"
 
 pgd_iterations = args.pgd_iterations
 attack_seq = args.attack_seq
@@ -136,8 +137,9 @@ lora_config = LoraConfig(
     **lora_args
 )
 
-model = get_peft_model(model, lora_config)
-model.print_trainable_parameters()
+if args.lora:
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
 
 # %%
 
@@ -1277,7 +1279,7 @@ pgd_trainer = ProjectedGradProbeLAT(
     model_iterations_per_step=4,  # how many times to train on each step
     num_steps=num_steps,  # number of epochs
     max_batch_per_acc=1 if train_mt else 2,  # max size of a minibatch
-    model_layers_module="base_model.model.model.layers",  # where the model layers are
+    model_layers_module="base_model.model.model.layers" if args.lora else "model.layers",  # where the model layers are
     reinitialize_dev_optim=True,
     only_train_lora=True,
     adversary_loss=adversary_loss,
