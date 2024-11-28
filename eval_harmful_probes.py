@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import torch
 from datasets import load_dataset
+from datasets import concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_lens import utils as tl_utils
 from transformer_lens import HookedTransformer
@@ -62,7 +63,10 @@ def load_data(model_type, tokenizer, eval_only=True, abhay_jailbreaks=False, tra
     benign_test_dataset = load_dataset(hf_dataset_path, split="ultrachat_test")
     
     if train_mt:
-        circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_mt_train")
+        # circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_mt_train")
+        circuit_breakers_train_dataset = concatenate_datasets([load_dataset(hf_dataset_path, split="circuit_breakers_harmful_train"),
+                                                               load_dataset(hf_dataset_path, split="circuit_breakers_harmful_mt_train")])
+        circuit_breakers_train_dataset.shuffle(seed=42)
     else:
         circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_train")
     circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
@@ -85,8 +89,14 @@ def load_data(model_type, tokenizer, eval_only=True, abhay_jailbreaks=False, tra
 
     if not eval_only:
         if train_mt:
-            benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_mt_train")
-            or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_mt_train")
+            # benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_mt_train")
+            # or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_mt_train")
+            benign_train_dataset = concatenate_datasets([load_dataset(hf_dataset_path, split="ultrachat_train"),
+                                                        load_dataset(hf_dataset_path, split="ultrachat_mt_train")])
+            or_bench_train_dataset = concatenate_datasets([load_dataset(hf_dataset_path, split="or_bench_train"),
+                                                          load_dataset(hf_dataset_path, split="or_bench_mt_train")])
+            benign_train_dataset.shuffle(seed=42)
+            or_bench_train_dataset.shuffle(seed=42)
         else:
             benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_train")
             or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_train")
