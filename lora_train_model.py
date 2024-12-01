@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformer_lens import utils as tl_utils
-from transformer_lens import HookedTransformer
+# from transformer_lens import utils as tl_utils
+# from transformer_lens import HookedTransformer
 from collections import defaultdict
 from tqdm.auto import tqdm
 import einops
@@ -84,8 +84,9 @@ model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=tor
             low_cpu_mem_usage=True,
             # attn_implementation="flash_attention_2",
             device_map="cuda",
+            token="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",
             trust_remote_code=True,)
-tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token="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")
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
 
@@ -195,7 +196,7 @@ def zero_init(m):
     return m
 
 # %%
-hidden_size = 32
+hidden_size = 64
 probe_dict = {}
 for layer_i in cache_layers:
     # probe_dict[layer_i] = Scale(zero_init(MLP(model.cfg.d_model, hidden_size, 1))).cuda()
@@ -443,6 +444,8 @@ def collate_fn(batch, tokenizer, attack_seq=None):
     harmful_tokenized = tokenizer(harmful_prompts, padding=True, return_tensors="pt")
     benign_tokens = benign_tokenized.input_ids
     harmful_tokens = harmful_tokenized.input_ids
+    benign_attention_mask = benign_tokenized.attention_mask.clone()
+    harmful_attention_mask = harmful_tokenized.attention_mask.clone()
 
     benign_labels_mask = torch.zeros_like(benign_tokens, dtype=torch.bool)
     harmful_labels_mask = torch.zeros_like(harmful_tokens, dtype=torch.bool)
@@ -497,8 +500,10 @@ def collate_fn(batch, tokenizer, attack_seq=None):
     return_dict = {
         'benign_tokens': benign_tokens,
         'benign_labels_mask': benign_labels_mask,
+        'benign_attention_mask': benign_attention_mask,
         'harmful_tokens': harmful_tokens,
         'harmful_labels_mask': harmful_labels_mask,
+        'harmful_attention_mask': harmful_attention_mask,
     }
     if 'sft_prompt' in batch[0]:
         return_dict["sft_tokens"] = sft_tokens
@@ -519,7 +524,7 @@ probing_dataset = ProbingDataset(
     sft_benign=False,
 )
 # Create the dataloader
-batch_size = 4  # Adjust as needed
+batch_size = 8  # Adjust as needed
 probing_dataloader = DataLoader(
     probing_dataset,
     batch_size=batch_size,
@@ -580,8 +585,10 @@ def compute_probe_loss(
     probe_dict,
     benign_tokens,
     benign_labels_mask,
+    benign_attention_mask,
     harmful_tokens,
     harmful_labels_mask,
+    harmful_attention_mask,
     coefs
 ):
     
@@ -596,7 +603,10 @@ def compute_probe_loss(
     if benign_tokens is not None:
         benign_losses = []
         with torch.autocast(device_type="cuda"):
-            hidden_states = model(input_ids=benign_tokens, output_hidden_states=True).hidden_states
+            # print(f"{benign_tokens[0]=}")
+            # print(f"{benign_attention_mask[0]=}")
+            # print(f"{benign_labels_mask[0]=}")
+            hidden_states = model(input_ids=benign_tokens, attention_mask=benign_attention_mask, output_hidden_states=True).hidden_states
             for layer_i in probe_dict:
                 probe_outputs = probe_dict[layer_i](hidden_states[layer_i])
                 benign_losses.append(torch.nn.functional.binary_cross_entropy_with_logits(probe_outputs, torch.zeros_like(probe_outputs), reduction="none")[benign_labels_mask].mean())
@@ -610,7 +620,10 @@ def compute_probe_loss(
     if harmful_tokens is not None:
         harmful_losses = []
         with torch.autocast(device_type="cuda"):
-            hidden_states = model(input_ids=harmful_tokens, output_hidden_states=True).hidden_states
+            # print(f"{harmful_tokens[0]=}")
+            # print(f"{harmful_attention_mask[0]=}")
+            # print(f"{harmful_labels_mask[0]=}")
+            hidden_states = model(input_ids=harmful_tokens, attention_mask=harmful_attention_mask, output_hidden_states=True).hidden_states
             for layer_i in probe_dict:
                 # apply probe to hidden_states[layer_i]
                 probe_outputs = probe_dict[layer_i](hidden_states[layer_i])
@@ -645,16 +658,20 @@ def do_adversary_probe_step(
     if include_towards_loss:
         toward_tokens = batch["harmful_tokens"].cuda()
         toward_labels_mask = batch["harmful_labels_mask"].cuda()
+        toward_attention_mask = batch["harmful_attention_mask"].cuda()
     else:
         toward_tokens = None
         toward_labels_mask = None
+        toward_attention_mask = None
 
     if include_away_loss:
         away_tokens = batch["benign_tokens"].cuda()
         away_labels_mask = batch["benign_labels_mask"].cuda()
+        away_attention_mask = batch["benign_attention_mask"].cuda()
     else:
         away_tokens = None
         away_labels_mask = None
+        away_attention_mask = None
 
     # print(f"{toward_tokens=}\n{toward_labels_mask=}\n{away_tokens=}\n{away_labels_mask=}\n")
     # Optimize loss function
@@ -663,8 +680,10 @@ def do_adversary_probe_step(
         probe_dict=probe_dict,
         benign_tokens=toward_tokens, # this is reversed because attacker wants model to think harmful is benign
         benign_labels_mask=toward_labels_mask,
+        benign_attention_mask=toward_attention_mask,
         harmful_tokens=away_tokens, # typically this is not applied
         harmful_labels_mask=away_labels_mask,
+        harmful_attention_mask=away_attention_mask,
         coefs=coefs,
     )
     
@@ -678,10 +697,11 @@ def compute_loss(
     model,
     towards_tokens, # in this case, towards = benign from above
     towards_labels_mask,
+    towards_attention_mask,
     coefs,
     away_tokens=None,
     away_labels_mask=None,
-
+    away_attention_mask=None,
     towards_labels=None,
     away_labels=None,
 ):
@@ -690,8 +710,8 @@ def compute_loss(
 
     if benign_tokens is not None:
         with torch.autocast(device_type="cuda"):
-            # print(f"{towards_tokens=}")
-            logits = model(input_ids=towards_tokens).logits
+            print(f"{towards_tokens=}")
+            logits = model(input_ids=towards_tokens, attention_mask=towards_attention_mask).logits
             # will break if 
             final_logits = logits[:, :-1][towards_labels_mask[:, 1:]]
             if towards_labels is None:
@@ -707,7 +727,7 @@ def compute_loss(
         
     if away_tokens is not None:
         with torch.autocast(device_type="cuda"):
-            logits = model(input_ids=away_tokens).logits
+            logits = model(input_ids=away_tokens, attention_mask=away_attention_mask).logits
             final_logits = logits[:, :-1][away_labels_mask[:, 1:]]
             if away_labels is None:
                 away_labels = away_tokens[:, 1:][away_labels_mask[:, 1:]]
@@ -739,16 +759,20 @@ def do_adversary_step(
     if include_towards_loss:
         towards_tokens = batch["harmful_tokens"].cuda()
         towards_labels_mask = batch["harmful_labels_mask"].cuda()
+        towards_labels_attention_mask = batch["harmful_attention_mask"].cuda()
     else:
         towards_tokens = None
         towards_labels_mask = None
+        towards_labels_attention_mask = None
 
     if include_away_loss:
         away_tokens = batch["benign_tokens"].cuda()
         away_labels_mask = batch["benign_labels_mask"].cuda()
+        away_labels_attention_mask = batch["benign_attention_mask"].cuda()
     else:
         away_tokens = None
         away_labels_mask = None
+        away_labels_attention_mask = None
 
     # print(f"{toward_tokens=}\n{toward_labels_mask=}\n{away_tokens=}\n{away_labels_mask=}\n")
     # Optimize loss function
@@ -756,8 +780,10 @@ def do_adversary_step(
         model=model,
         towards_tokens=towards_tokens, # this is reversed because attacker wants model to think harmful is benign
         towards_labels_mask=towards_labels_mask,
+        towards_labels_attention_mask=towards_labels_attention_mask,
         away_tokens=away_tokens, # typically this is not applied
         away_labels_mask=away_labels_mask,
+        away_labels_attention_mask=away_labels_attention_mask,
         coefs=coefs,
     )
     
@@ -788,6 +814,7 @@ def do_defense_probe_step(
     if include_towards_loss:
         toward_tokens = batch["benign_tokens"].to(device)
         toward_labels_mask = batch["benign_labels_mask"].to(device)
+        towards_attention_mask = batch["benign_attention_mask"].to(device)
         if adversary_only_on_harmful:
             for wrapper in wrappers:
                 wrapper.enabled = False
@@ -796,8 +823,10 @@ def do_defense_probe_step(
                 probe_dict=probe_dict,
                 benign_tokens=toward_tokens,
                 benign_labels_mask=toward_labels_mask,
+                benign_attention_mask=towards_attention_mask,
                 harmful_tokens=None,
                 harmful_labels_mask=None,
+                harmful_attention_mask=None,
                 coefs=coefs,
             )
             for wrapper in wrappers:
@@ -810,14 +839,17 @@ def do_defense_probe_step(
     if include_away_loss:
         away_tokens = batch["harmful_tokens"].to(device)
         away_labels_mask = batch["harmful_labels_mask"].to(device)
+        away_attention_mask = batch["harmful_attention_mask"].to(device)
         if adversary_only_on_harmful:
             harmful_loss = compute_probe_loss(
                 model=model,
                 probe_dict=probe_dict,
                 benign_tokens=None,
                 benign_labels_mask=None,
+                benign_attention_mask=None,
                 harmful_tokens=away_tokens,
                 harmful_labels_mask=away_labels_mask,
+                harmful_attention_mask=away_attention_mask,
                 coefs=coefs,
             )
     else:
@@ -830,8 +862,10 @@ def do_defense_probe_step(
             probe_dict=probe_dict,
             benign_tokens=toward_tokens,
             benign_labels_mask=toward_labels_mask,
+            benign_attention_mask=towards_attention_mask,
             harmful_tokens=away_tokens,
             harmful_labels_mask=away_labels_mask,
+            harmful_attention_mask=away_attention_mask,
             coefs=coefs,
         )
     else:
@@ -1273,7 +1307,7 @@ pgd_trainer = ProjectedGradProbeLAT(
     pgd_layers=pgd_layers,  # what layers to attack
     model_layers=layers_to_transform,  # what layers to train
     epsilon=epsilon,  # attack l2 constraint
-    outer_learning_rate=1e-5,  # model lr
+    outer_learning_rate=1e-3,  # model lr
     inner_learning_rate=5e-2,  # attacker lr
     pgd_iterations_per_step=pgd_iterations,  # how many steps of projected gradient descent to do
     model_iterations_per_step=4,  # how many times to train on each step
@@ -1317,11 +1351,11 @@ except:
     print("Failed to create repo")
     pass
 
-api.upload_folder(
-    folder_path=save_name,
-    repo_id=f"PhillipGuo/{save_name}",
-    repo_type="model",
-)
+# api.upload_folder(
+#     folder_path=save_name,
+#     repo_id=f"PhillipGuo/{save_name}",
+#     repo_type="model",
+# )
 
 # %%
 if args.eval_pretrained_probes:

@@ -205,8 +205,8 @@ def load_data(model_type, tokenizer, eval_only=True, abhay_jailbreaks=False, tra
 
 
     if not eval_only:
-        benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0] + all_prompts["or_bench_train"][0]# + all_prompts["circuit_breakers_refusal_train"][0]
-        benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1] + all_prompts["or_bench_train"][1]# + all_prompts["circuit_breakers_refusal_train"][1]
+        benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0]# + all_prompts["or_bench_train"][0]# + all_prompts["circuit_breakers_refusal_train"][0]
+        benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1]# + all_prompts["or_bench_train"][1]# + all_prompts["circuit_breakers_refusal_train"][1]
 
         # sample_indices = np.random.choice(len(benign_train_prompts), n_train_prompts, replace=False)
         # benign_train_prompts = [benign_train_prompts[i] for i in sample_indices]
@@ -278,6 +278,8 @@ def retrieve_acts(model, tokenizer, prompt_list, batch_size, layer=None, to_cpu=
                 prompt_toks = prompt_toks[:, -truncate_length:]
                 attn_mask = attn_mask[:, -truncate_length:]
         
+        # print(f"{prompt_toks[0]=}")
+        # print(f"{attn_mask[0]=}")
         # if assert_end_newline:
         with torch.no_grad():
             model_output = model(
@@ -290,6 +292,9 @@ def retrieve_acts(model, tokenizer, prompt_list, batch_size, layer=None, to_cpu=
             for key_layer in layer:
                 if to_cpu:
                     if seq_pos_list is not None:
+                        # print(f"{seq_pos_list=}")
+                        # print("LEN", len(seq_pos_list))
+                        # print(len(hidden_states[key_layer]))
                         for j in range(len(hidden_states[key_layer])):
                             caches[key_layer].append(hidden_states[key_layer][j, seq_pos_list[i+j], :].cpu())
                     else:
