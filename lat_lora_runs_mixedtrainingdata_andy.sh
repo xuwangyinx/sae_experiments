@@ -3,6 +3,7 @@
 #SBATCH --output=slurm_%J.txt
 #SBATCH --time=20:00:00
 #SBATCH --nodes=1
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --mem-per-gpu=80G
 
@@ -20,6 +21,7 @@ epsilon_options=(0.3 1.0)
 attack_seq=${attack_seq_options[0]}
 
 
+
 # # Single-turn + multi-turn training data with lora and linear probe
 # ~/anaconda3/envs/fsdp2/bin/python lora_train_model.py --use_sft \
 #     --attack_seq="input" \
@@ -32,19 +34,6 @@ attack_seq=${attack_seq_options[0]}
 #     --eval_pretrained_probes
 
 
-# # Single-turn + multi-turn training data without lora, sft and MLP probe
-# python lora_train_model.py \
-#     --attack_seq="input" \
-#     --adversary_loss="output" \
-#     --pgd_iterations=0 \
-#     --pgd_layers="4,8,12,16,20" \
-#     --num_steps=150 \
-#     --epsilon=0.3 \
-#     --train_mt \
-#     --eval_pretrained_probes \
-#     --probe_type='mlp'
-
-
 # Single-turn + multi-turn training data without lora, sft and MLP probe
 python lora_train_model.py \
     --attack_seq="input" \
@@ -53,8 +42,10 @@ python lora_train_model.py \
     --pgd_layers="4,8,12,16,20" \
     --num_steps=150 \
     --epsilon=0.3 \
+    --train_mt \
     --eval_pretrained_probes \
     --probe_type='mlp'
+
 
 # # Evaluation
 

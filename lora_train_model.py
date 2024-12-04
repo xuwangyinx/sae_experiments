@@ -1090,8 +1090,14 @@ class ProjectedGradProbeLAT(LATBaseClass):
         self.adv_loss_coefs = normalize_dict(adv_loss_coefs)
         self.def_loss_coefs = normalize_dict(def_loss_coefs)
         
+        # Combine model parameters and probe_dict parameters
+        probe_params = []
+        for probe in self.probe_dict.values():
+            probe_params.extend(probe.parameters())
+        all_params = list(self.model.parameters()) + probe_params
+
         self.def_optim = torch.optim.AdamW(
-            self.model.parameters(),
+            all_params,
             lr=self.outer_learning_rate
         )
         
@@ -1228,8 +1234,14 @@ class ProjectedGradProbeLAT(LATBaseClass):
             sft_batch = None
         # Reinitialize optimizer every LAT step
         if self.reinitialize_dev_optim:
+            # Combine model parameters and probe_dict parameters
+            probe_params = []
+            for probe in self.probe_dict.values():
+                probe_params.extend(probe.parameters())
+            all_params = list(self.model.parameters()) + probe_params
+
             self.def_optim = torch.optim.AdamW(
-                self.model.parameters(),
+                all_params,
                 lr=self.outer_learning_rate
             )
         # Start training loop
