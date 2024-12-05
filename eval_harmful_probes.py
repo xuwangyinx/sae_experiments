@@ -13,6 +13,7 @@ from transformer_lens import HookedTransformer
 from collections import defaultdict
 from tqdm.auto import tqdm
 import einops
+import ipdb
 
 
 from transformers import GPT2Tokenizer, GPTNeoXTokenizerFast, AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -810,6 +811,7 @@ if __name__ == "__main__":
 
     print("Getting caches")
     all_prompts, in_distribution_formal_names, out_distribution_formal_names = load_data(model_type=args.model_type, tokenizer=tokenizer, eval_only=True, abhay_jailbreaks=args.abhay_jailbreaks)
+    # ipdb.set_trace()
     print(all_prompts.keys())
     all_caches, cache_ranges = get_acts_and_ranges(model=model, tokenizer=tokenizer, cache_layers=cache_layers, all_prompts=all_prompts, batch_size=12)
 

@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from .utils import *
-from .policy_gradient_utils import policy_grad_loss, evaluate_completion
+# from .policy_gradient_utils import policy_grad_loss, evaluate_completion
 from peft import PeftModel
 
 from transformers import AutoModelForCausalLM, AutoTokenizer

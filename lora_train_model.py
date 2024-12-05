@@ -47,6 +47,7 @@ parser.add_argument("--eval_pretrained_probes", action="store_true",
 parser.add_argument('--train_mt', action='store_true',
                     help='Whether to train on (augmented) multi turn data')
 parser.add_argument('--lora', action='store_true')
+parser.add_argument("--save_name", type=str, default=None)
 args = parser.parse_args()
 model_name_or_path = args.model_name_or_path
 model_type = args.model_type
@@ -63,6 +64,9 @@ epsilon = args.epsilon
 if pgd_iterations > 0:
     pgd_layers = args.pgd_layers.replace(",", "_")
     save_name += f"_seq{attack_seq}_adv{adversary_loss}_pgd{pgd_layers}_eps{epsilon}"
+
+if args.save_name is not None:
+    save_name = args.save_name
 
 pgd_layers_temp = args.pgd_layers.split(",")
 pgd_layers = []
@@ -710,7 +714,7 @@ def compute_loss(
 
     if benign_tokens is not None:
         with torch.autocast(device_type="cuda"):
-            print(f"{towards_tokens=}")
+            # print(f"{towards_tokens=}")
             logits = model(input_ids=towards_tokens, attention_mask=towards_attention_mask).logits
             # will break if 
             final_logits = logits[:, :-1][towards_labels_mask[:, 1:]]
@@ -780,10 +784,10 @@ def do_adversary_step(
         model=model,
         towards_tokens=towards_tokens, # this is reversed because attacker wants model to think harmful is benign
         towards_labels_mask=towards_labels_mask,
-        towards_labels_attention_mask=towards_labels_attention_mask,
+        towards_attention_mask=towards_labels_attention_mask,
         away_tokens=away_tokens, # typically this is not applied
         away_labels_mask=away_labels_mask,
-        away_labels_attention_mask=away_labels_attention_mask,
+        away_attention_mask=away_labels_attention_mask,
         coefs=coefs,
     )
     
@@ -1356,7 +1360,7 @@ api = HfApi()
 # # By default, files are uploaded at the root of the repo
 try:
     create_repo(
-        repo_id=f"PhillipGuo/{save_name}",
+        repo_id=f"xuwangyin/{save_name}",
         repo_type="model",
     )
 except:
