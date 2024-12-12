@@ -206,8 +206,8 @@ def load_data(model_type, tokenizer, eval_only=True, abhay_jailbreaks=False, tra
 
 
     if not eval_only:
-        benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0]# + all_prompts["or_bench_train"][0]# + all_prompts["circuit_breakers_refusal_train"][0]
-        benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1]# + all_prompts["or_bench_train"][1]# + all_prompts["circuit_breakers_refusal_train"][1]
+        benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0] + all_prompts["or_bench_train"][0]# + all_prompts["circuit_breakers_refusal_train"][0]
+        benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1] + all_prompts["or_bench_train"][1]# + all_prompts["circuit_breakers_refusal_train"][1]
 
         # sample_indices = np.random.choice(len(benign_train_prompts), n_train_prompts, replace=False)
         # benign_train_prompts = [benign_train_prompts[i] for i in sample_indices]
